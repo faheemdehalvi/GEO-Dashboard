@@ -20,10 +20,29 @@ try {
 } catch(e) { console.warn('Could not load .env file:', e.message); }
 
 const db = require('./db');
+const { requireAuth } = require('./auth');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Auth gate: every /api/* route requires a valid Supabase JWT EXCEPT the
+// small set of public sub-paths listed below. Place this BEFORE all route
+// handlers so the gate runs first.
+const PUBLIC_API_SUBPATHS = new Set([
+  '/health',         // platform liveness
+  '/auth/config'     // frontend needs to know which Supabase project to log in to
+]);
+app.use('/api', (req, res, next) => {
+  if (PUBLIC_API_SUBPATHS.has(req.path)) return next();
+  return requireAuth(req, res, next);
+});
+
+// Public: lets the frontend bootstrap its Supabase client
+app.get('/api/auth/config', (req, res) => res.json({
+  supabaseUrl:            process.env.SUPABASE_URL || null,
+  supabasePublishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || null
+}));
 
 // ============================================================
 // CONFIG

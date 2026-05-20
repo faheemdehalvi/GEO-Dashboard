@@ -4,6 +4,7 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kynection Analytics Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -268,6 +269,25 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 </style>
 </head>
 <body>
+
+<!-- LOGIN OVERLAY (hidden until auth check runs) -->
+<div id="auth-overlay" style="display:none;position:fixed;inset:0;z-index:99999;background:#0F1729;display:flex;align-items:center;justify-content:center;font-family:Inter,system-ui,sans-serif;color:#fff">
+  <div style="background:#1A3A5C;padding:40px;border-radius:12px;width:380px;max-width:92vw;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <h1 style="font-size:22px;font-weight:600;margin-bottom:6px">Kynection Dashboard</h1>
+    <p id="auth-sub" style="font-size:13px;color:#94A3B8;margin-bottom:24px">Sign in to continue</p>
+    <button id="auth-google-btn" onclick="authSignInGoogle()" style="width:100%;padding:12px;background:#fff;color:#1F2937;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:10px">
+      <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l5.7-5.7C34 6 29.3 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.6 16 19 13 24 13c3.1 0 5.8 1.1 8 3l5.7-5.7C34 6 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.8-2 13.4-5.2l-6.2-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.2 0-9.6-3.3-11.2-8L6.3 32.8C9.6 39.7 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.1 5.6l6.2 5.2c-.4.4 6.6-4.8 6.6-14.8 0-1.3-.1-2.4-.4-3.5z"/></svg>
+      Continue with Google
+    </button>
+    <div style="text-align:center;color:#64748B;font-size:11px;margin:12px 0;display:flex;align-items:center;gap:10px"><div style="flex:1;height:1px;background:#334155"></div>OR<div style="flex:1;height:1px;background:#334155"></div></div>
+    <form id="auth-email-form" onsubmit="authSignInEmail(event)" style="display:flex;flex-direction:column;gap:10px">
+      <input id="auth-email" type="email" placeholder="Email" required autocomplete="email" style="padding:11px 14px;border:1px solid #334155;background:#0F1729;color:#fff;border-radius:8px;font-size:14px;font-family:inherit">
+      <input id="auth-password" type="password" placeholder="Password" required autocomplete="current-password" style="padding:11px 14px;border:1px solid #334155;background:#0F1729;color:#fff;border-radius:8px;font-size:14px;font-family:inherit">
+      <button type="submit" id="auth-email-btn" style="padding:12px;background:#2563EB;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer">Sign in</button>
+    </form>
+    <div id="auth-error" style="display:none;margin-top:14px;padding:10px;background:rgba(239,68,68,.15);color:#FCA5A5;border-radius:6px;font-size:12px"></div>
+  </div>
+</div>
 
 <!-- SIDEBAR -->
 <div id="sidebar">
@@ -1071,6 +1091,106 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 </div>
 
 <script>
+// ══════════════════════════════════════════════════════════════
+// AUTH BOOTSTRAP (Supabase)
+// Runs before any dashboard code. Blocks the UI behind a login overlay
+// unless there's a valid Supabase session. Wraps fetch() so every /api/*
+// request carries the Authorization: Bearer <jwt> header automatically.
+// ══════════════════════════════════════════════════════════════
+let _sb = null;           // Supabase client (created after config fetched)
+let _sbSession = null;    // current session { access_token, user, ... }
+
+async function authInit() {
+  const overlay = document.getElementById('auth-overlay');
+  let cfg;
+  try {
+    cfg = await window.fetch('/api/auth/config').then(r => r.json());
+  } catch (e) {
+    showAuthError('Cannot reach server: ' + e.message);
+    overlay.style.display = 'flex';
+    return false;
+  }
+  if (!cfg.supabaseUrl || !cfg.supabasePublishableKey) {
+    // Auth not configured on server — proceed without it (dev mode)
+    console.warn('Auth disabled: server is missing SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY');
+    return true;
+  }
+  _sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+  });
+  // Handle OAuth callback (?code=... or #access_token=...) before doing anything else
+  const { data: { session } } = await _sb.auth.getSession();
+  _sbSession = session;
+  _sb.auth.onAuthStateChange((_evt, sess) => { _sbSession = sess; });
+  if (!session) {
+    overlay.style.display = 'flex';
+    return false;
+  }
+  overlay.style.display = 'none';
+  return true;
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('auth-error');
+  if (!el) { alert(msg); return; }
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+async function authSignInGoogle() {
+  if (!_sb) return showAuthError('Auth not configured');
+  const { error } = await _sb.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.origin + window.location.pathname }
+  });
+  if (error) showAuthError(error.message);
+}
+
+async function authSignInEmail(e) {
+  e.preventDefault();
+  if (!_sb) return showAuthError('Auth not configured');
+  const email    = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const btn = document.getElementById('auth-email-btn');
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  const { data, error } = await _sb.auth.signInWithPassword({ email, password });
+  btn.disabled = false; btn.textContent = 'Sign in';
+  if (error) { showAuthError(error.message); return; }
+  _sbSession = data.session;
+  document.getElementById('auth-overlay').style.display = 'none';
+  // Re-run dashboard init now that we're authenticated
+  if (typeof init === 'function') init();
+}
+
+async function authSignOut() {
+  if (_sb) await _sb.auth.signOut();
+  _sbSession = null;
+  location.reload();
+}
+
+// Wrap fetch so every /api/* call carries the Bearer token. On 401, drop the
+// session and surface the login overlay so the user can re-auth.
+const _originalFetch = window.fetch.bind(window);
+window.fetch = async function(input, init) {
+  const url = typeof input === 'string' ? input : (input?.url || '');
+  const isApi = url.startsWith('/api/') || url.includes(location.host + '/api/');
+  const isPublic = url.includes('/api/auth/config') || url.includes('/api/health');
+  if (isApi && !isPublic && _sbSession?.access_token) {
+    init = init || {};
+    const headers = new Headers(init.headers || {});
+    if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + _sbSession.access_token);
+    init.headers = headers;
+  }
+  const res = await _originalFetch(input, init);
+  if (isApi && !isPublic && res.status === 401 && _sb) {
+    // Session expired or invalid — force re-login
+    await _sb.auth.signOut();
+    _sbSession = null;
+    document.getElementById('auth-overlay').style.display = 'flex';
+  }
+  return res;
+};
+
 // ══════════════════════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════════════════════
@@ -4963,7 +5083,8 @@ async function init() {
     if (!S.yt.loaded) loadYouTube();
   } catch(e) { console.error('Init error:', e); }
 }
-init();
+// Gate dashboard init behind auth — only fetch real data once we have a session
+authInit().then(authed => { if (authed) init(); });
 
 // ── Content Tab ────────────────────────────────────────────────
 let _contentItems = [];
