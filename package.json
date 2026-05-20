@@ -1,0 +1,14 @@
+{
+  "name": "kynection-dashboard",
+  "version": "1.0.0",
+  "description": "Kynection SEO/AEO Live Dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "docx": "^9.6.1",
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
+  }
+}

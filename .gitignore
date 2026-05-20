@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Environment variables — never commit API keys
+.env
+.env.*
+
+# Auth tokens — sensitive OAuth credentials
+ga4-gsc-tokens.json
+youtube-tokens.json
+
+# Cache files
+semrush-cache.json
+
+# Misc
+test-cowork.txt
+*.log
+*.docx
