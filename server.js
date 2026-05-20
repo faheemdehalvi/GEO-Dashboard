@@ -1405,10 +1405,15 @@ app.post('/api/aeo/stream', async (req, res) => {
   for (const p of prompts) {
     if (!_aeoResults[p.id]) _aeoResults[p.id] = { prompt:p.text, topic:p.topic, tag:p.tag, runs:[] };
     try { await db.upsertAeoPrompt(p.id, { prompt:p.text, topic:p.topic, tag:p.tag }); } catch(e) { console.error('upsertAeoPrompt:', e.message); }
-    for (const model of models) {
+
+    // Fire all models for this prompt concurrently. Each model's IIFE streams
+    // its own result/error event as soon as it lands; allSettled waits for the
+    // batch before moving to the next prompt. JS is single-threaded so the
+    // `done++` increments are race-free across the .then callbacks.
+    const modelTasks = models.map(model => (async () => {
       send({ type:'progress', done, total, model, prompt:p.text });
       const caller = CALLERS[model];
-      if (!caller) { send({ type:'skip', model, prompt:p.text, reason:'Not available' }); done++; continue; }
+      if (!caller) { send({ type:'skip', model, prompt:p.text, reason:'Not available' }); done++; return; }
       try {
         let responseText, sourceUrls = [];
         const result = await caller(p.text);
@@ -1432,9 +1437,8 @@ app.post('/api/aeo/stream', async (req, res) => {
         saveAeoResults();
         send({ type:'result', promptId:p.id, run, done:++done, total });
       } catch(e) { send({ type:'error', model, prompt:p.text, error:e.message }); done++; }
-      // 500ms between calls — paid Gemini tier, no RPM restriction
-      await new Promise(r => setTimeout(r, 500));
-    }
+    })());
+    await Promise.allSettled(modelTasks);
   }
   send({ type:'complete', total:done });
   res.end();
