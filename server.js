@@ -1405,14 +1405,21 @@ app.post('/api/aeo/stream', async (req, res) => {
   const total = prompts.length * models.length;
   let done = 0;
 
-  for (const p of prompts) {
+  // Prompt-level concurrency. Lower bound 1 (sequential), upper bound 10
+  // (10 prompts × N models = 10N parallel API calls — be mindful of
+  // upstream rate limits). Default 5 keeps OpenAI tier-2 happy.
+  const PROMPT_CONCURRENCY = Math.max(1, Math.min(10,
+    parseInt(req.body?.promptConcurrency) || parseInt(process.env.AEO_PROMPT_CONCURRENCY) || 5
+  ));
+
+  // Process a single prompt: fire all selected models in parallel, await all.
+  const processPrompt = async (p) => {
     if (!_aeoResults[p.id]) _aeoResults[p.id] = { prompt:p.text, topic:p.topic, tag:p.tag, runs:[] };
     try { await db.upsertAeoPrompt(p.id, { prompt:p.text, topic:p.topic, tag:p.tag }); } catch(e) { console.error('upsertAeoPrompt:', e.message); }
 
-    // Fire all models for this prompt concurrently. Each model's IIFE streams
-    // its own result/error event as soon as it lands; allSettled waits for the
-    // batch before moving to the next prompt. JS is single-threaded so the
-    // `done++` increments are race-free across the .then callbacks.
+    // Each model's IIFE streams its own result/error SSE event as soon as it
+    // resolves; allSettled gates moving on until the whole prompt is done.
+    // JS is single-threaded so the `done++` increments are race-free.
     const modelTasks = models.map(model => (async () => {
       send({ type:'progress', done, total, model, prompt:p.text });
       const caller = CALLERS[model];
@@ -1442,7 +1449,18 @@ app.post('/api/aeo/stream', async (req, res) => {
       } catch(e) { send({ type:'error', model, prompt:p.text, error:e.message }); done++; }
     })());
     await Promise.allSettled(modelTasks);
-  }
+  };
+
+  // Worker pool: N workers pull prompts off a shared queue. When the queue
+  // is empty, each worker exits. Outer await ensures all workers have
+  // drained before we send 'complete'.
+  const queue = prompts.slice();
+  const workers = Array.from(
+    { length: Math.min(PROMPT_CONCURRENCY, queue.length) },
+    async () => { while (queue.length) { const p = queue.shift(); if (p) await processPrompt(p); } }
+  );
+  await Promise.all(workers);
+
   send({ type:'complete', total:done });
   res.end();
 });

@@ -4718,6 +4718,15 @@ function updateStreamSchedule() {
   document.getElementById('stream-schedule-status').textContent = on ? 'Automatic runs enabled' : 'Automatic runs are off';
 }
 
+// Batch size = how many prompts per /api/aeo/stream POST. Sized to fit under
+// Vercel's 60s function timeout assuming ~6s per prompt (10 prompts × 6s = 60s,
+// minus per-call overhead). Adjust down if upstream APIs slow down.
+const STREAM_BATCH_SIZE = 10;
+// Server-side prompt concurrency: how many prompts to run in parallel per
+// batch. Each prompt fires N model calls in parallel inside that. So
+// effective in-flight calls = PROMPT_CONCURRENCY × selected models.
+const STREAM_PROMPT_CONCURRENCY = 5;
+
 async function runStreamNow() {
   const models = [...document.querySelectorAll('#model-selector .model-btn.active-model')].map(b=>b.dataset.model);
   if (!models.length) { alert('Please select at least one model'); return; }
@@ -4729,53 +4738,86 @@ async function runStreamNow() {
   btn.disabled = true;
   btn.textContent = 'Streaming…';
   document.getElementById('stream-progress').style.display = '';
+  document.getElementById('stream-progress-bar').style.width = '0%';
+
+  const totalExpected = prompts.length * models.length;
+  let totalDone = 0;
+  const startedAt = Date.now();
+
+  // Chunk prompts into batches that fit under the serverless timeout
+  const batches = [];
+  for (let i = 0; i < prompts.length; i += STREAM_BATCH_SIZE) {
+    batches.push(prompts.slice(i, i + STREAM_BATCH_SIZE));
+  }
+
+  const updateBar = () => {
+    const pct = totalExpected > 0 ? Math.round((totalDone/totalExpected)*100) : 0;
+    document.getElementById('stream-progress-bar').style.width = pct+'%';
+  };
+  const updateLabel = (modelName, promptText, batchIdx) => {
+    const batchInfo = batches.length > 1 ? ` (batch ${batchIdx+1}/${batches.length})` : '';
+    document.getElementById('stream-progress-label').textContent =
+      `${totalDone} / ${totalExpected}${batchInfo} — ${modelName||''}: ${(promptText||'').slice(0,50)}…`;
+  };
 
   try {
-    const response = await fetch('/api/aeo/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts: prompts.map(p=>({id:p.id,text:p.text,topic:p.topic,tag:p.tag})), models })
-    });
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batch = batches[bi];
+      const response = await fetch('/api/aeo/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompts: batch.map(p=>({id:p.id,text:p.text,topic:p.topic,tag:p.tag})),
+          models,
+          promptConcurrency: STREAM_PROMPT_CONCURRENCY
+        })
+      });
+      if (!response.ok) throw new Error(`Batch ${bi+1} failed: HTTP ${response.status}`);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const evt = JSON.parse(line.slice(6));
-          if (evt.type === 'progress' || evt.type === 'result') {
-            const pct = evt.total > 0 ? Math.round((evt.done/evt.total)*100) : 0;
-            document.getElementById('stream-progress-bar').style.width = pct+'%';
-            document.getElementById('stream-progress-label').textContent = `${evt.done||0} / ${evt.total||'?'} — ${evt.model||''}: ${(evt.prompt||'').slice(0,50)}…`;
-          }
-          if (evt.type === 'result') {
-            if (!_aeoResults[evt.promptId]) _aeoResults[evt.promptId] = { runs:[] };
-            _aeoResults[evt.promptId].runs.unshift(evt.run);
-            if (_aeoCurrentPrompt && _aeoCurrentPrompt.id === evt.promptId) renderResponsesTable(evt.promptId);
-            // Live update — KPIs + charts refresh on every new run, debounced to keep UI smooth
-            scheduleAEOLiveRefresh();
-          }
-          if (evt.type === 'complete') {
-            btn.textContent = `✓ Done (${evt.total} runs)`;
-            renderAEOKPIs();
-            renderAEOPlatformBreakdown();
-            renderAEOCharts();
-            setTimeout(closeStreamModal, 2000);
-          }
-          if (evt.type === 'error') {
-            document.getElementById('stream-progress-label').textContent = `⚠ ${evt.model}: ${evt.error}`;
-          }
-        } catch(e) {}
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'progress') {
+              updateLabel(evt.model, evt.prompt, bi);
+            } else if (evt.type === 'result') {
+              totalDone++;
+              if (!_aeoResults[evt.promptId]) _aeoResults[evt.promptId] = { runs:[] };
+              _aeoResults[evt.promptId].runs.unshift(evt.run);
+              if (_aeoCurrentPrompt && _aeoCurrentPrompt.id === evt.promptId) renderResponsesTable(evt.promptId);
+              scheduleAEOLiveRefresh();
+              updateBar();
+              updateLabel(evt.run?.model || '', evt.run?.prompt || '', bi);
+            } else if (evt.type === 'skip' || evt.type === 'error') {
+              totalDone++;
+              updateBar();
+              if (evt.type === 'error') {
+                document.getElementById('stream-progress-label').textContent = `⚠ ${evt.model}: ${evt.error}`;
+              }
+            }
+            // 'complete' events from intermediate batches are ignored — we
+            // only finalise after the outer for-loop drains.
+          } catch(e) {}
+        }
       }
     }
+
+    // All batches finished
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    btn.textContent = `✓ Done (${totalDone} runs in ${elapsed}s)`;
+    renderAEOKPIs();
+    renderAEOPlatformBreakdown();
+    renderAEOCharts();
+    setTimeout(closeStreamModal, 2000);
   } catch(e) {
     btn.textContent = '✕ Error: ' + e.message;
     btn.disabled = false;
