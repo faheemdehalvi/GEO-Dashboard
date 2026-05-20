@@ -4,6 +4,7 @@ node_modules/
 # Environment variables — never commit API keys
 .env
 .env.*
+!.env.example
 
 # Auth tokens — sensitive OAuth credentials
 ga4-gsc-tokens.json

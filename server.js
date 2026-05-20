@@ -19,6 +19,8 @@ try {
   }
 } catch(e) { console.warn('Could not load .env file:', e.message); }
 
+const db = require('./db');
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -1083,10 +1085,18 @@ async function detectGSCSite() {
 }
 
 // ── AEO Results persistence ─────────────────────────────────
-const AEO_RESULTS_FILE = process.env.AEO_RESULTS_FILE || path.join(__dirname, 'aeo-results.json');
+// In-memory cache, hydrated from db (Supabase or JSON fallback) on startup.
+// All mutation paths persist incrementally via the db module.
 let _aeoResults = {};
-try { _aeoResults = JSON.parse(fs.readFileSync(AEO_RESULTS_FILE, 'utf8')); } catch(e) {}
-function saveAeoResults() { try { fs.writeFileSync(AEO_RESULTS_FILE, JSON.stringify(_aeoResults)); } catch(e) {} }
+db.loadAllAeoResults()
+  .then(d => { _aeoResults = d; console.log(`📊 AEO: hydrated ${Object.keys(d).length} prompts`); })
+  .catch(e => { console.error('Failed to load AEO results:', e.message); });
+
+// JSON-fallback writer (only used when Supabase isn't configured).
+function saveAeoResults() {
+  if (db.USE_SUPABASE) return; // Supabase path persists per-mutation
+  try { fs.writeFileSync(process.env.AEO_RESULTS_FILE || path.join(__dirname, 'aeo-results.json'), JSON.stringify(_aeoResults)); } catch(e) {}
+}
 
 const COMP_NAMES = {
   'allotrac.io':'Allotrac','aroflo.com':'AroFlo','ascora.com.au':'Ascora',
@@ -1157,20 +1167,29 @@ function checkMentions(text) {
 
 app.get('/api/aeo/results', (req, res) => res.json(_aeoResults));
 
-app.post('/api/aeo/delete-runs', (req, res) => {
+app.post('/api/aeo/delete-runs', async (req, res) => {
   const { promptId, indices } = req.body || {};
   if (!promptId || !Array.isArray(indices)) return res.status(400).json({ error: 'Invalid request' });
   if (_aeoResults[promptId]?.runs) {
-    const sorted = [...indices].sort((a, b) => b - a);
-    sorted.forEach(i => { if (i >= 0 && i < _aeoResults[promptId].runs.length) _aeoResults[promptId].runs.splice(i, 1); });
-    saveAeoResults();
+    const runs = _aeoResults[promptId].runs;
+    const valid = indices.filter(i => i >= 0 && i < runs.length);
+    const dbIds = valid.map(i => runs[i]._dbId).filter(Boolean);
+    const sorted = [...valid].sort((a, b) => b - a);
+    sorted.forEach(i => runs.splice(i, 1));
+    try {
+      await db.deleteAeoRuns(dbIds);
+      saveAeoResults();
+    } catch(e) {
+      return res.status(500).json({ error: e.message });
+    }
   }
   res.json({ ok: true });
 });
 
 // Backfill mentionPosition, mentionRank, sentiment AND attributedCitation on old runs
-app.post('/api/aeo/backfill', (req, res) => {
+app.post('/api/aeo/backfill', async (req, res) => {
   let updated = 0;
+  const dbUpdates = [];
   for (const data of Object.values(_aeoResults)) {
     for (const run of (data.runs || [])) {
       let changed = false;
@@ -1202,10 +1221,28 @@ app.post('/api/aeo/backfill', (req, res) => {
         changed = true;
       }
 
-      if (changed) updated++;
+      if (changed) {
+        updated++;
+        if (run._dbId) {
+          dbUpdates.push({
+            id: run._dbId,
+            mentioned: run.mentioned,
+            cited: run.cited,
+            attributed_citation: run.attributedCitation,
+            mention_position: run.mentionPosition,
+            mention_rank: run.mentionRank ?? null,
+            sentiment: run.sentiment
+          });
+        }
+      }
     }
   }
-  saveAeoResults();
+  try {
+    await db.updateAeoRuns(dbUpdates);
+    saveAeoResults();
+  } catch(e) {
+    return res.status(500).json({ error: e.message });
+  }
   res.json({ ok: true, updated });
 });
 
@@ -1367,6 +1404,7 @@ app.post('/api/aeo/stream', async (req, res) => {
 
   for (const p of prompts) {
     if (!_aeoResults[p.id]) _aeoResults[p.id] = { prompt:p.text, topic:p.topic, tag:p.tag, runs:[] };
+    try { await db.upsertAeoPrompt(p.id, { prompt:p.text, topic:p.topic, tag:p.tag }); } catch(e) { console.error('upsertAeoPrompt:', e.message); }
     for (const model of models) {
       send({ type:'progress', done, total, model, prompt:p.text });
       const caller = CALLERS[model];
@@ -1389,6 +1427,7 @@ app.post('/api/aeo/stream', async (req, res) => {
         });
         checks.attributedCitation = kynInSources;
         const run = { date:new Date().toISOString().slice(0,10), model, ...checks, sourceUrls, promptType:p.tag, prompt:p.text, response:responseText.slice(0,15000) };
+        try { await db.insertAeoRun(p.id, run); } catch(e) { console.error('insertAeoRun:', e.message); }
         _aeoResults[p.id].runs.unshift(run);
         saveAeoResults();
         send({ type:'result', promptId:p.id, run, done:++done, total });
@@ -1493,25 +1532,28 @@ app.post('/api/aeo/deep-dive', async (req, res) => {
 });
 
 // ── Content Items ──────────────────────────────────────────────
-const CONTENT_ITEMS_FILE = process.env.CONTENT_ITEMS_FILE || path.join(__dirname, 'content-items.json');
-function loadContentItemsData() { try { return JSON.parse(fs.readFileSync(CONTENT_ITEMS_FILE,'utf8')); } catch(e) { return []; } }
-function saveContentItemsData(items) { fs.writeFileSync(CONTENT_ITEMS_FILE, JSON.stringify(items, null, 2)); }
-
-app.get('/api/content-items', (req, res) => { res.json(loadContentItemsData()); });
+app.get('/api/content-items', async (req, res) => {
+  try { res.json(await db.listContentItems()); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 app.post('/api/content-items', async (req, res) => {
   const { urls, snipeType } = req.body;
   if (!Array.isArray(urls) || !urls.length) return res.status(400).json({ error: 'urls required' });
-  const items = loadContentItemsData();
-  const newItems = [];
-  for (const url of urls) {
-    // Always create a new item — competitor URL is reference only, not a unique key
-    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, url, title: '', snipeType: snipeType || 'import', createdAt: new Date().toISOString() };
-    items.unshift(item);
-    newItems.push(item);
+  const newItems = urls.map(url => ({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    url,
+    title: '',
+    snipeType: snipeType || 'import',
+    createdAt: new Date().toISOString()
+  }));
+  try {
+    await db.insertContentItems(newItems);
+    const items = await db.listContentItems();
+    res.json(items); // respond immediately — no waiting for page title
+  } catch(e) {
+    return res.status(500).json({ error: e.message });
   }
-  saveContentItemsData(items);
-  res.json(items); // respond immediately — no waiting for page title
 
   // Fetch page titles in background after responding
   for (const item of newItems) {
@@ -1524,9 +1566,7 @@ app.post('/api/content-items', async (req, res) => {
         }); r2.on('error',()=>resolve('')); r2.on('timeout',()=>{r2.destroy();resolve('');});
       });
       if (title) {
-        const all = loadContentItemsData();
-        const found = all.find(i => i.id === item.id);
-        if (found) { found.title = title; saveContentItemsData(all); }
+        try { await db.updateContentItem(item.id, { title }); } catch(e) {}
       }
     } catch(e) {}
   }
@@ -1831,14 +1871,16 @@ Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or aft
 
     // Save to content item if itemId provided
     if (itemId) {
-      const items = loadContentItemsData();
-      const idx = items.findIndex(i => i.id === itemId);
-      if (idx !== -1) {
-        items[idx].snipe = { brief: result.brief, draft: result.draft, meta: result.meta, generatedAt: new Date().toISOString(), sniped: url };
-        items[idx].title = items[idx].title || kynectionTitle;
-        items[idx].cost = costMeta;
-        saveContentItemsData(items);
-      }
+      try {
+        const existing = await db.getContentItem(itemId);
+        if (existing) {
+          await db.updateContentItem(itemId, {
+            snipe: { brief: result.brief, draft: result.draft, meta: result.meta, generatedAt: new Date().toISOString(), sniped: url },
+            title: existing.title || kynectionTitle,
+            cost:  costMeta
+          });
+        }
+      } catch(e) { console.error('snipe save:', e.message); }
     }
 
     // Emit staged events for progress bar with small delays for visual effect
@@ -1857,29 +1899,26 @@ Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or aft
 });
 
 // PATCH /api/content-items/:id — update a content item
-app.patch('/api/content-items/:id', (req, res) => {
-  const items = loadContentItemsData();
-  const idx = items.findIndex(i => i.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  Object.assign(items[idx], req.body);
-  saveContentItemsData(items);
-  res.json(items[idx]);
+app.patch('/api/content-items/:id', async (req, res) => {
+  try {
+    const updated = await db.updateContentItem(req.params.id, req.body || {});
+    if (!updated) return res.status(404).json({ error: 'Not found' });
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // DELETE /api/content-items/:id — remove a content item
-app.delete('/api/content-items/:id', (req, res) => {
-  let items = loadContentItemsData();
-  const len = items.length;
-  items = items.filter(i => i.id !== req.params.id);
-  if (items.length === len) return res.status(404).json({ error: 'Not found' });
-  saveContentItemsData(items);
-  res.json({ ok: true });
+app.delete('/api/content-items/:id', async (req, res) => {
+  try {
+    const ok = await db.deleteContentItem(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/content-items/:id/export — generate and download a .docx
 app.get('/api/content-items/:id/export', async (req, res) => {
-  const items = loadContentItemsData();
-  const item = items.find(i => i.id === req.params.id);
+  const item = await db.getContentItem(req.params.id).catch(() => null);
   if (!item) return res.status(404).json({ error: 'Not found' });
 
   const { Document, Packer, Paragraph, TextRun, HeadingLevel, PageBreak, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType, UnderlineType } = require('docx');

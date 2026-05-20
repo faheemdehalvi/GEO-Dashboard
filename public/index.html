@@ -1168,7 +1168,8 @@ function refreshAll() {
     else if (activeTab === 'mqls') loadMQLs();
     else if (activeTab === 'deals') loadDeals();
     else if (activeTab === 'youtube') loadYouTube();
-    // semrush: date-independent, never auto-reload. aeo: static render.
+    else if (activeTab === 'aeo' || activeTab === 'prompts') renderAEO();
+    // semrush: date-independent, never auto-reload.
   });
 }
 
@@ -2944,8 +2945,37 @@ const AEO_CSV = [
 const AEO_PROMPTS = AEO_CSV.map((r, i) => ({ id: 'aeo_' + i, text: r[0], topic: r[1], tag: r[2] }));
 
 // Compute stream-based metrics for a prompt from stored results
-function promptMetrics(promptId) {
-  const runs = _aeoResults[promptId]?.runs || [];
+// Derive current + previous-period date windows from the global selector.
+// Returns null if no date filter is active (treat as "all time").
+function getAEODateRange() {
+  const sel = document.getElementById('date-range-sel');
+  let startStr, endStr, days;
+  if (window._customRange) {
+    startStr = window._customRange.start;
+    endStr   = window._customRange.end;
+    days     = window._customRange.days;
+  } else {
+    const raw = parseInt(sel?.value);
+    if (!raw || isNaN(raw)) return null;
+    days = raw;
+    const end = new Date(); const start = new Date(); start.setDate(start.getDate() - (days - 1));
+    startStr = start.toISOString().slice(0,10);
+    endStr   = end.toISOString().slice(0,10);
+  }
+  const prevEnd = new Date(startStr + 'T00:00:00'); prevEnd.setDate(prevEnd.getDate() - 1);
+  const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (days - 1));
+  return {
+    days,
+    current:  { start: startStr, end: endStr },
+    previous: { start: prevStart.toISOString().slice(0,10), end: prevEnd.toISOString().slice(0,10) }
+  };
+}
+
+function promptMetrics(promptId, dateFilter) {
+  let runs = _aeoResults[promptId]?.runs || [];
+  if (dateFilter) {
+    runs = runs.filter(r => r.date && r.date >= dateFilter.start && r.date <= dateFilter.end);
+  }
   if (!runs.length) return null;
   const n = runs.length;
   const mentioned       = runs.filter(r => r.mentioned).length;
@@ -3008,6 +3038,20 @@ let _streamSinglePromptId = null;
 let _streamSelectedDays = ['Thu'];
 let _streamFreq = 'weekly';
 
+// Debounced re-render during a live stream — fires at most every 400ms
+let _aeoLiveRefreshTimer = null;
+function scheduleAEOLiveRefresh() {
+  if (_aeoLiveRefreshTimer) return;
+  _aeoLiveRefreshTimer = setTimeout(() => {
+    _aeoLiveRefreshTimer = null;
+    try {
+      renderAEOKPIs();
+      renderAEOPlatformBreakdown();
+      renderAEOCharts();
+    } catch(e) { console.warn('live refresh:', e); }
+  }, 400);
+}
+
 function pct(v, showSign=false) {
   if (v === undefined || v === null || isNaN(v)) return '<span style="color:var(--muted)">—</span>';
   const cls = v > 0 ? 'pct-pos' : v < 0 ? 'pct-neg' : 'pct-neu';
@@ -3050,32 +3094,76 @@ async function renderAEO() {
 
 function renderAEOKPIs() {
   const allPrompts = getAllPrompts();
-  const streamed = allPrompts.map(p => promptMetrics(p.id)).filter(Boolean);
-  const totalRuns = Object.values(_aeoResults).reduce((s,r) => s + (r.runs||[]).length, 0);
-  const avg = key => streamed.length ? streamed.reduce((s,m) => s + m[key], 0) / streamed.length : null;
-  const fmt = v => v !== null ? v.toFixed(1)+'%' : '—';
-  const fmtGap = v => v !== null ? (v >= 0 ? '+' : '') + v.toFixed(1)+'%' : '—';
-  const gapCol = v => v === null ? '' : v >= 0 ? 'color:#10B981' : 'color:#EF4444';
-  const avgMention    = avg('mentionPct');
-  const avgComp       = avg('compMentionPct');
-  const avgGap        = avg('mentionGap');
-  const avgCitation   = avg('citationPct');
-  const avgAttributed = avg('attributedCitationPct');
-  const avgWeightedSOV = avg('weightedSOV');
-  const rankedStreams  = streamed.filter(m => m.avgRank !== null);
-  const avgPosition   = rankedStreams.length ? rankedStreams.reduce((s,m)=>s+m.avgRank,0)/rankedStreams.length : null;
-  const noData = !streamed.length;
-  const allTopics = getAllTopics();
-  const fmtRank = v => v !== null ? v.toFixed(1) : '—';
-  document.getElementById('aeo-kpis').innerHTML = [
-    {l:'Mention %',            v: fmt(avgMention),      sub: noData ? 'Run Stream Data to populate' : 'Kynection mentioned in response'},
-    {l:'Weighted SOV',         v: fmt(avgWeightedSOV),  sub: noData ? 'Run Stream Data to populate' : 'Position-weighted, requires new runs'},
-    {l:'Avg Position',         v: fmtRank(avgPosition), sub: noData ? 'Run Stream Data to populate' : 'Brand rank in response (1=first), new runs only'},
-    {l:'Mention Gap',          v: fmtGap(avgGap),       sub: noData ? '—' : 'vs Competitor Mention %', col: gapCol(avgGap)},
-    {l:'Competitor Mention %', v: fmt(avgComp),         sub: '% responses mentioning any competitor'},
-    {l:'Citation %',           v: fmt(avgCitation),     sub: noData ? '—' : 'kynection.com.au linked as structured source'},
-    {l:'Prompts Tracked',      v: allPrompts.length,    sub: allTopics.length+' topics • '+totalRuns+' runs logged'},
-  ].map(k=>`<div class="kpi-card"><div class="kpi-label">${k.l}</div><div class="kpi-value" style="${k.col||''}">${k.v}</div><div style="font-size:10.5px;color:var(--muted);margin-top:2px">${k.sub}</div></div>`).join('');
+  const range      = getAEODateRange();
+  const totalRuns  = Object.values(_aeoResults).reduce((s,r) => s + (r.runs||[]).length, 0);
+  const allTopics  = getAllTopics();
+
+  // Compute averaged metrics across all prompts for a given date window
+  const computeAvg = (filter) => {
+    const streamed = allPrompts.map(p => promptMetrics(p.id, filter)).filter(Boolean);
+    if (!streamed.length) return { has:false };
+    const avg = k => streamed.reduce((s,m) => s + m[k], 0) / streamed.length;
+    const ranked = streamed.filter(m => m.avgRank !== null);
+    return {
+      has: true,
+      n: streamed.length,
+      runsInWindow: streamed.reduce((s,m) => s + m.n, 0),
+      mentionPct:    avg('mentionPct'),
+      compMentionPct:avg('compMentionPct'),
+      mentionGap:    avg('mentionGap'),
+      citationPct:   avg('citationPct'),
+      weightedSOV:   avg('weightedSOV'),
+      avgPosition:   ranked.length ? ranked.reduce((s,m)=>s+m.avgRank,0)/ranked.length : null
+    };
+  };
+
+  const curr = range ? computeAvg(range.current)  : computeAvg(null);
+  const prev = range ? computeAvg(range.previous) : { has:false };
+
+  const fmt    = v => v == null ? '—' : v.toFixed(1)+'%';
+  const fmtGap = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1)+'%';
+  const fmtRank= v => v == null ? '—' : v.toFixed(1);
+  const gapCol = v => v == null ? '' : v >= 0 ? 'color:#10B981' : 'color:#EF4444';
+
+  // ΔPercentage-point (for rates) and signed numeric (for rank — lower is better)
+  const ppBadge = (a, b) => {
+    if (!prev.has || a == null || b == null) return '<span class="kpi-change neutral">vs prev</span>';
+    const diff = a - b;
+    const cls  = diff > 0 ? 'up' : diff < 0 ? 'down' : 'neutral';
+    const arrow = diff > 0 ? '↑' : diff < 0 ? '↓' : '·';
+    return `<span class="kpi-change ${cls}">${arrow} ${Math.abs(diff).toFixed(1)}pp</span>`;
+  };
+  const rankBadge = (a, b) => {
+    if (!prev.has || a == null || b == null) return '<span class="kpi-change neutral">vs prev</span>';
+    const diff = a - b;       // positive = rank got worse
+    const cls  = diff < 0 ? 'up' : diff > 0 ? 'down' : 'neutral';
+    const arrow = diff < 0 ? '↑' : diff > 0 ? '↓' : '·';
+    return `<span class="kpi-change ${cls}">${arrow} ${Math.abs(diff).toFixed(1)}</span>`;
+  };
+
+  const periodLabel = range ? `vs prev ${range.days}d` : 'all time';
+  const noData = !curr.has;
+
+  const cards = [
+    {l:'Mention %',            v: fmt(curr.mentionPct),      d: ppBadge(curr.mentionPct, prev.mentionPct),       sub: noData ? 'Run Stream Data to populate' : 'Kynection mentioned in response'},
+    {l:'Weighted SOV',         v: fmt(curr.weightedSOV),     d: ppBadge(curr.weightedSOV, prev.weightedSOV),     sub: noData ? 'Run Stream Data to populate' : 'Position-weighted (early/mid/late)'},
+    {l:'Avg Position',         v: fmtRank(curr.avgPosition), d: rankBadge(curr.avgPosition, prev.avgPosition),   sub: noData ? 'Run Stream Data to populate' : 'Brand rank in response (1=first)'},
+    {l:'Mention Gap',          v: fmtGap(curr.mentionGap),   d: ppBadge(curr.mentionGap, prev.mentionGap),       sub: noData ? '—' : 'vs Competitor Mention %', col: gapCol(curr.mentionGap)},
+    {l:'Competitor Mention %', v: fmt(curr.compMentionPct),  d: ppBadge(curr.compMentionPct, prev.compMentionPct),sub:'% responses mentioning any competitor'},
+    {l:'Citation %',           v: fmt(curr.citationPct),     d: ppBadge(curr.citationPct, prev.citationPct),     sub: noData ? '—' : 'kynection.com.au as structured source'},
+    {l:'Prompts Tracked',      v: allPrompts.length,         d: '',                                              sub: `${allTopics.length} topics • ${range ? curr.runsInWindow+' runs in window' : totalRuns+' runs logged'}`},
+  ];
+
+  document.getElementById('aeo-kpis').innerHTML = cards.map(k => `
+    <div class="kpi-card">
+      <div class="kpi-label">${k.l}</div>
+      <div class="kpi-value" style="${k.col||''}">${k.v}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px;gap:8px">
+        ${k.d || '<span></span>'}
+        <span style="font-size:10px;color:var(--muted)">${k.d ? periodLabel : ' '}</span>
+      </div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:2px">${k.sub}</div>
+    </div>`).join('');
 }
 
 function renderAEOCharts() {
@@ -4552,10 +4640,14 @@ async function runStreamNow() {
             if (!_aeoResults[evt.promptId]) _aeoResults[evt.promptId] = { runs:[] };
             _aeoResults[evt.promptId].runs.unshift(evt.run);
             if (_aeoCurrentPrompt && _aeoCurrentPrompt.id === evt.promptId) renderResponsesTable(evt.promptId);
+            // Live update — KPIs + charts refresh on every new run, debounced to keep UI smooth
+            scheduleAEOLiveRefresh();
           }
           if (evt.type === 'complete') {
             btn.textContent = `✓ Done (${evt.total} runs)`;
             renderAEOKPIs();
+            renderAEOPlatformBreakdown();
+            renderAEOCharts();
             setTimeout(closeStreamModal, 2000);
           }
           if (evt.type === 'error') {
