@@ -75,31 +75,38 @@ async function main() {
   }
   console.log(`✓ upserted ${promptRows.length} prompts`);
 
-  // Build run rows — latest run per prompt only, filtered to TARGET_DATE
+  // Build run rows — for each prompt, take the latest April-16 run PER MODEL.
+  // The source file has multiple runs per (prompt, model) on the same day
+  // (re-runs); since the array uses unshift order, runs[0] is newest. We walk
+  // the array and keep the first occurrence of each model name.
   const runRows = [];
+  let ordinalCounter = 1;
   for (const id of promptIds) {
-    const runs = data[id].runs || [];
-    if (!runs.length) continue;
-    const latest = runs[0]; // unshift order: [0] is the newest
-    if (latest.date !== TARGET_DATE) continue;
-    runRows.push({
-      prompt_id:             id,
-      run_date:              latest.date,
-      model:                 latest.model || null,
-      mentioned:             !!latest.mentioned,
-      cited:                 !!latest.cited,
-      attributed_citation:   !!latest.attributedCitation,
-      sources:               !!latest.sources,
-      competitors_mentioned: latest.competitorsMentioned || [],
-      mention_position:      latest.mentionPosition || null,
-      mention_rank:          latest.mentionRank ?? null,
-      sentiment:             latest.sentiment || null,
-      source_urls:           latest.sourceUrls || [],
-      prompt_type:           latest.promptType || null,
-      prompt_text:           latest.prompt || null,
-      response:              latest.response || null,
-      ordinal:               1
-    });
+    const april16 = (data[id].runs || []).filter(r => r.date === TARGET_DATE);
+    if (!april16.length) continue;
+    const seenModels = new Set();
+    for (const r of april16) {
+      if (!r.model || seenModels.has(r.model)) continue;
+      seenModels.add(r.model);
+      runRows.push({
+        prompt_id:             id,
+        run_date:              r.date,
+        model:                 r.model,
+        mentioned:             !!r.mentioned,
+        cited:                 !!r.cited,
+        attributed_citation:   !!r.attributedCitation,
+        sources:               !!r.sources,
+        competitors_mentioned: r.competitorsMentioned || [],
+        mention_position:      r.mentionPosition || null,
+        mention_rank:          r.mentionRank ?? null,
+        sentiment:             r.sentiment || null,
+        source_urls:           r.sourceUrls || [],
+        prompt_type:           r.promptType || null,
+        prompt_text:           r.prompt || null,
+        response:              r.response || null,
+        ordinal:               ordinalCounter++
+      });
+    }
   }
 
   console.log(`📥 inserting ${runRows.length} runs (date=${TARGET_DATE})`);
