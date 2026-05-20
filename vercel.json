@@ -1,17 +1,19 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/index.js", "use": "@vercel/node" },
+    {
+      "src": "api/index.js",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": "{server.js,db.js,auth.js,snipe-skill.md}",
+        "maxDuration": 60
+      }
+    },
     { "src": "public/**", "use": "@vercel/static" }
   ],
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/index.js" },
     { "src": "/(.+\\..+)", "dest": "/public/$1" },
     { "src": "/(.*)", "dest": "/public/index.html" }
-  ],
-  "functions": {
-    "api/index.js": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }
