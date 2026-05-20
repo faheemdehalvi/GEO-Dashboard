@@ -663,6 +663,18 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
       <!-- KPI cards -->
       <div class="kpi-grid" id="aeo-kpis" style="margin-bottom:16px"></div>
 
+      <!-- Stream History panel -->
+      <div class="card" id="aeo-stream-history-card" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px 8px;border-bottom:1px solid var(--border)">
+          <div>
+            <div style="font-size:14px;font-weight:600;color:var(--text)">Stream History</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:1px">When streams were run. Click a date to filter the dashboard to that day.</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="loadStreamHistory()" title="Refresh" style="white-space:nowrap;font-size:11px">⟳</button>
+        </div>
+        <div id="aeo-stream-history-body" style="padding:6px 0"></div>
+      </div>
+
       <!-- SOV charts row -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px">
         <div class="card" id="aeo-sov-card"></div>
@@ -3185,9 +3197,88 @@ function gap(v) {
   return `<span class="${cls}">${sign}${v.toFixed(1)}%</span>`;
 }
 
+// ── Stream history ────────────────────────────────────────────
+let _streamHistory = [];
+
+async function loadStreamHistory() {
+  try {
+    const res = await fetch('/api/aeo/stream-history');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _streamHistory = await res.json();
+  } catch (e) { console.warn('loadStreamHistory:', e.message); _streamHistory = []; }
+  renderStreamHistory();
+}
+
+function renderStreamHistory() {
+  const el = document.getElementById('aeo-stream-history-body');
+  if (!el) return;
+  if (!_streamHistory.length) {
+    el.innerHTML = `<div style="padding:18px;text-align:center;color:var(--muted);font-size:12.5px">No streams recorded yet. Run a stream from the Prompts tab to create the first entry.</div>`;
+    return;
+  }
+  const rows = _streamHistory.map(s => {
+    const isImport = s.source === 'import';
+    const srcBadge = isImport
+      ? `<span style="display:inline-block;padding:2px 6px;background:#FEF3C7;color:#92400E;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px">IMPORT</span>`
+      : `<span style="display:inline-block;padding:2px 6px;background:#DBEAFE;color:#1E40AF;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px">STREAM</span>`;
+    const models = (s.models || []).join(', ') || '—';
+    const note = s.note ? `<div style="font-size:11.5px;color:#475569;margin-top:3px">${escapeHtml(s.note)}</div>` : '';
+    return `
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 18px;border-bottom:1px solid var(--border)" data-id="${s.id}">
+        <div style="min-width:96px">
+          <a href="#" onclick="filterAEOByDate('${s.run_date}');return false;" style="color:var(--accent);text-decoration:none;font-weight:600;font-size:13px">${s.run_date}</a>
+          ${srcBadge}
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12.5px;color:var(--text)">
+            <strong>${s.runs_count}</strong> runs across <strong>${s.prompts_count}</strong> prompt${s.prompts_count===1?'':'s'} · ${models}
+          </div>
+          ${note}
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="editStreamHistoryNote('${s.id}')" title="Edit note" style="font-size:11px;padding:4px 8px">${s.note?'Edit':'+ Note'}</button>
+      </div>`;
+  }).join('');
+  el.innerHTML = rows;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+async function editStreamHistoryNote(id) {
+  const existing = _streamHistory.find(s => s.id === id);
+  const current = existing?.note || '';
+  const next = prompt('Note for this stream (date: ' + existing?.run_date + ')', current);
+  if (next === null) return; // cancelled
+  try {
+    const res = await fetch('/api/aeo/stream-history/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: next })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    await loadStreamHistory();
+  } catch (e) { alert('Failed to save note: ' + e.message); }
+}
+
+// Set the global date range selector to a single day. Frontend will refresh
+// the active tab via the existing refreshAll() flow.
+function filterAEOByDate(dateStr) {
+  window._customRange = { start: dateStr, end: dateStr, days: 1 };
+  const sel = document.getElementById('date-range-sel');
+  if (sel) {
+    // Pick the "custom" option if present, else just leave the label change
+    const opt = [...sel.options].find(o => o.value === 'custom');
+    if (opt) sel.value = 'custom';
+    sel.options[sel.selectedIndex].text = dateStr;
+  }
+  if (typeof refreshAll === 'function') refreshAll();
+}
+
 async function renderAEO() {
   // Load stored results
   try { const r = await fetch('/api/aeo/results').then(x=>x.json()); _aeoResults = r || {}; } catch(e) {}
+  loadStreamHistory(); // fire-and-forget — renders into its own panel
 
   // Populate topic filter with all topics (base + custom)
   const topicEl = document.getElementById('aeo-filter-topic');
@@ -4814,6 +4905,22 @@ async function runStreamNow() {
     // All batches finished
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     btn.textContent = `✓ Done (${totalDone} runs in ${elapsed}s)`;
+
+    // Record this stream in history so the user can see when it happened and
+    // pick period-comparison windows around it. Fire-and-forget — failure
+    // here shouldn't block the UI.
+    fetch('/api/aeo/stream-history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run_date: new Date().toISOString().slice(0,10),
+        prompts_count: prompts.length,
+        models,
+        runs_count: totalDone,
+        source: 'manual'
+      })
+    }).then(() => loadStreamHistory()).catch(e => console.warn('stream-history:', e));
+
     renderAEOKPIs();
     renderAEOPlatformBreakdown();
     renderAEOCharts();

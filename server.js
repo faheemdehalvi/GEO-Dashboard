@@ -1170,6 +1170,45 @@ function checkMentions(text) {
 
 app.get('/api/aeo/results', (req, res) => res.json(_aeoResults));
 
+// ── Stream history ────────────────────────────────────────────
+app.get('/api/aeo/stream-history', async (req, res) => {
+  try { res.json(await db.listStreamHistory(parseInt(req.query.limit) || 100)); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/aeo/stream-history', async (req, res) => {
+  const { run_date, prompts_count, models, runs_count, source, note } = req.body || {};
+  if (!run_date || !Array.isArray(models)) return res.status(400).json({ error: 'run_date and models[] required' });
+  try {
+    const row = await db.recordStreamHistory({
+      run_date,
+      prompts_count: prompts_count || 0,
+      models,
+      runs_count: runs_count || 0,
+      source: source || 'manual',
+      note: note || null
+    });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/aeo/stream-history/:id', async (req, res) => {
+  const { note } = req.body || {};
+  try {
+    const row = await db.updateStreamHistoryNote(req.params.id, note ?? null);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/aeo/stream-history/:id', async (req, res) => {
+  try {
+    const ok = await db.deleteStreamHistoryEntry(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/aeo/delete-runs', async (req, res) => {
   const { promptId, indices } = req.body || {};
   if (!promptId || !Array.isArray(indices)) return res.status(400).json({ error: 'Invalid request' });

@@ -60,6 +60,25 @@ create table if not exists content_items (
 create index if not exists content_items_created_idx on content_items(created_at desc);
 
 -- ============================================================
+-- Stream history (one row per completed stream run — manual or import).
+-- Lets the dashboard show when streams happened and what was in scope so
+-- the user can pick period-comparison windows that actually contain data.
+-- ============================================================
+create table if not exists stream_history (
+  id            uuid primary key default gen_random_uuid(),
+  run_date      date not null,
+  ran_at        timestamptz not null default now(),
+  prompts_count int not null default 0,
+  models        text[] not null default '{}',
+  runs_count    int not null default 0,
+  source        text not null default 'manual',
+  note          text
+);
+
+create index if not exists stream_history_run_date_idx on stream_history(run_date desc);
+create index if not exists stream_history_ran_at_idx   on stream_history(ran_at desc);
+
+-- ============================================================
 -- Generic API response cache (SEMrush, PageSpeed, YouTube, etc.)
 -- One row per cache key. TTL is applied at read time by the app.
 -- ============================================================

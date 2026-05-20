@@ -268,6 +268,54 @@ function memoryContentToDb(item, onlyProvided = false) {
 }
 
 // ============================================================
+// Stream history
+// ============================================================
+
+async function listStreamHistory(limit = 100) {
+  if (!USE_SUPABASE) return [];
+  const { data, error } = await supabase
+    .from('stream_history')
+    .select('*')
+    .order('ran_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data || [];
+}
+
+async function recordStreamHistory({ run_date, prompts_count, models, runs_count, source = 'manual', note = null }) {
+  if (!USE_SUPABASE) return null;
+  const { data, error } = await supabase
+    .from('stream_history')
+    .insert({ run_date, prompts_count, models, runs_count, source, note })
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function updateStreamHistoryNote(id, note) {
+  if (!USE_SUPABASE) return null;
+  const { data, error } = await supabase
+    .from('stream_history')
+    .update({ note })
+    .eq('id', id)
+    .select('*')
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function deleteStreamHistoryEntry(id) {
+  if (!USE_SUPABASE) return false;
+  const { error, count } = await supabase
+    .from('stream_history')
+    .delete({ count: 'exact' })
+    .eq('id', id);
+  if (error) throw error;
+  return (count || 0) > 0;
+}
+
+// ============================================================
 // Generic API response cache (SEMrush, PageSpeed, YouTube, etc.)
 // L1: in-process Map keyed by cache_key
 // L2: Supabase api_cache table (persists across restarts)
@@ -355,6 +403,10 @@ module.exports = {
   insertContentItems,
   updateContentItem,
   deleteContentItem,
+  listStreamHistory,
+  recordStreamHistory,
+  updateStreamHistoryNote,
+  deleteStreamHistoryEntry,
   cacheGet,
   cacheSet,
   cacheGetWithStale
