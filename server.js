@@ -415,37 +415,29 @@ app.get('/api/ga4/daily-trend', async (req, res) => {
 // ============================================================
 // SEMrush routes — with 24-hour persistent cache
 // ============================================================
-const SR_CACHE_FILE = path.join(__dirname, 'semrush-cache.json');
-const SR_CACHE_TTL = 23 * 60 * 60 * 1000; // 23 hours
-let _srCache = {};
-try { _srCache = JSON.parse(fs.readFileSync(SR_CACHE_FILE, 'utf8')); } catch(e) {}
-
-function saveSrCache() {
-  try { fs.writeFileSync(SR_CACHE_FILE, JSON.stringify(_srCache, null, 2)); } catch(e) {}
-}
+const SR_CACHE_TTL_SECONDS = 23 * 60 * 60; // 23 hours
 
 function srCached(key, fn) {
   return async (req, res) => {
-    const cacheKey = key + ':' + JSON.stringify(req.query);
-    const cached = _srCache[cacheKey];
-    const isFresh = cached && Date.now() - cached.ts < SR_CACHE_TTL && !cached.data?.error;
-    // Serve immediately if fresh
-    if (isFresh) return res.json({ ...cached.data, cached: true, cachedAt: new Date(cached.ts).toISOString() });
+    const cacheKey = 'semrush:' + key + ':' + JSON.stringify(req.query);
+    const lookup = await db.cacheGetWithStale(cacheKey, SR_CACHE_TTL_SECONDS);
+    // Serve immediately if fresh and not an error blob
+    if (lookup?.fresh && !lookup.data?.error) {
+      return res.json({ ...lookup.data, cached: true, cachedAt: new Date(lookup.ts).toISOString() });
+    }
     // Try to refresh, but always fall back to stale cache on any failure
     try {
       const data = await fn(req);
       if (!data?.error) {
-        _srCache[cacheKey] = { data, ts: Date.now() };
-        saveSrCache();
+        await db.cacheSet(cacheKey, 'semrush', data);
         return res.json(data);
       }
-      // API returned an error body — fall through to stale cache
       throw new Error(data.error);
     } catch(e) {
-      if (cached && !cached.data?.error) {
-        const age = Math.round((Date.now() - cached.ts) / 36e5);
+      if (lookup && !lookup.data?.error) {
+        const age = Math.round((Date.now() - lookup.ts) / 36e5);
         console.warn(`SEMrush (${key}) serving stale cache (${age}h old): ${e.message}`);
-        return res.json({ ...cached.data, cached: true, stale: true, cachedAt: new Date(cached.ts).toISOString() });
+        return res.json({ ...lookup.data, cached: true, stale: true, cachedAt: new Date(lookup.ts).toISOString() });
       }
       res.status(500).json({ error: e.message });
     }
@@ -540,20 +532,16 @@ app.get('/api/semrush/tracked-competitors', srCached('tracked-comp', async (req)
   return { rows: results };
 }));
 
-// PageSpeed cache: { mobile: {data, ts}, desktop: {data, ts} }
-const _psCache = {};
-const PS_CACHE_TTL = 23 * 60 * 60 * 1000; // 23 hours
+const PS_CACHE_TTL_SECONDS = 23 * 60 * 60; // 23 hours
 const PS_API_KEY = process.env.PSI_KEY || ''; // optional: set PSI_KEY env var for higher quota
 
 app.get('/api/pagespeed', async (req, res) => {
   try {
     const url = req.query.url || 'https://kynection.com.au';
     const strategy = req.query.strategy || 'mobile';
-    const cacheKey = `${strategy}:${url}`;
-    // Return cached result if fresh
-    const cached = _psCache[cacheKey];
-    if (cached && Date.now() - cached.ts < PS_CACHE_TTL) return res.json(cached.data);
-    // Build API URL
+    const cacheKey = `pagespeed:${strategy}:${url}`;
+    const cached = await db.cacheGet(cacheKey, PS_CACHE_TTL_SECONDS);
+    if (cached) return res.json(cached);
     const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=${strategy}${PS_API_KEY ? '&key=' + PS_API_KEY : ''}`;
     const r = await fetch(apiUrl);
     const d = await r.json();
@@ -574,7 +562,7 @@ app.get('/api/pagespeed', async (req, res) => {
       speedIndex: audits['speed-index']?.displayValue || '—',
       fetchedAt: new Date().toISOString()
     };
-    _psCache[cacheKey] = { data: result, ts: Date.now() };
+    await db.cacheSet(cacheKey, 'pagespeed', result);
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -962,15 +950,11 @@ app.get('/api/hubspot/leads-pipeline', async (req, res) => {
 // ============================================================
 let _ytChannelId = null;
 
-// In-memory cache for YouTube endpoints (30-minute TTL — YT Analytics data lags 24-48h anyway)
-const _ytCache = {};
-const YT_CACHE_TTL = 30 * 60 * 1000;
-function ytCacheGet(key) {
-  const e = _ytCache[key];
-  if (e && Date.now() - e.ts < YT_CACHE_TTL) return e.data;
-  return null;
-}
-function ytCacheSet(key, data) { _ytCache[key] = { ts: Date.now(), data }; }
+// YouTube response cache (30-minute TTL — YT Analytics data lags 24-48h anyway).
+// Now backed by db.cache* (L1 in-memory + L2 Supabase api_cache).
+const YT_CACHE_TTL_SECONDS = 30 * 60;
+const ytCacheGet = key => db.cacheGet('youtube:' + key, YT_CACHE_TTL_SECONDS);
+const ytCacheSet = (key, data) => db.cacheSet('youtube:' + key, 'youtube', data);
 
 async function getChannelId() {
   if (_ytChannelId) return _ytChannelId;
@@ -992,7 +976,7 @@ app.get('/api/youtube/overview', async (req, res) => {
   try {
     const days = parseInt(req.query.days) || 28;
     const cacheKey = `overview_${days}`;
-    const cached = ytCacheGet(cacheKey);
+    const cached = await ytCacheGet(cacheKey);
     if (cached) return res.json(cached);
     const t = await getYTToken();
     const { start, end } = ytDateRange(days);
@@ -1013,7 +997,7 @@ app.get('/api/youtube/top-videos', async (req, res) => {
   try {
     const days = parseInt(req.query.days) || 28;
     const cacheKey = `top-videos_${days}`;
-    const cached = ytCacheGet(cacheKey);
+    const cached = await ytCacheGet(cacheKey);
     if (cached) return res.json(cached);
     const t = await getYTToken();
     const { start, end } = ytDateRange(days);
@@ -1036,7 +1020,7 @@ app.get('/api/youtube/top-videos', async (req, res) => {
 
 app.get('/api/youtube/traffic-sources', async (req, res) => {
   try {
-    const cached = ytCacheGet('traffic-sources');
+    const cached = await ytCacheGet('traffic-sources');
     if (cached) return res.json(cached);
     const t = await getYTToken();
     const { start, end } = ytDateRange(28);
@@ -1048,7 +1032,7 @@ app.get('/api/youtube/traffic-sources', async (req, res) => {
 
 app.get('/api/youtube/trend', async (req, res) => {
   try {
-    const cached = ytCacheGet('trend');
+    const cached = await ytCacheGet('trend');
     if (cached) return res.json(cached);
     const t = await getYTToken();
     const { start, end } = ytDateRange(90);
@@ -1060,7 +1044,7 @@ app.get('/api/youtube/trend', async (req, res) => {
 
 app.get('/api/youtube/demographics', async (req, res) => {
   try {
-    const cached = ytCacheGet('demographics');
+    const cached = await ytCacheGet('demographics');
     if (cached) return res.json(cached);
     const t = await getYTToken();
     const { start, end } = ytDateRange(28);
@@ -2058,13 +2042,24 @@ app.get('/api/content-items/:id/export', async (req, res) => {
 
 // Start
 // ============================================================
-const PORT = process.env.PORT || 4016;
-app.listen(PORT, async () => {
-  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  🚀  Kynection Dashboard  |  v3.0');
-  console.log(`  📡  http://localhost:${PORT}`);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-  await detectGSCSite();
-  const { exec } = require('child_process');
-  exec(`start http://localhost:${PORT}`);
-});
+// detectGSCSite() runs once per process. On Vercel each cold container will
+// fire it; locally it runs at boot below.
+detectGSCSite().catch(e => console.warn('GSC detect:', e.message));
+
+// Only bind a port when this file is executed directly (i.e. `node server.js`
+// locally). When imported as a module (e.g. by `api/index.js` on Vercel) the
+// platform handles request routing — calling app.listen would crash the
+// serverless function with EADDRINUSE on warm invocations.
+if (require.main === module) {
+  const PORT = process.env.PORT || 4016;
+  app.listen(PORT, async () => {
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('  🚀  Kynection Dashboard  |  v3.0');
+    console.log(`  📡  http://localhost:${PORT}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    const { exec } = require('child_process');
+    exec(`start http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

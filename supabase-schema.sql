@@ -60,6 +60,20 @@ create table if not exists content_items (
 create index if not exists content_items_created_idx on content_items(created_at desc);
 
 -- ============================================================
+-- Generic API response cache (SEMrush, PageSpeed, YouTube, etc.)
+-- One row per cache key. TTL is applied at read time by the app.
+-- ============================================================
+create table if not exists api_cache (
+  cache_key   text primary key,
+  scope       text not null,
+  data        jsonb not null,
+  cached_at   timestamptz not null default now()
+);
+
+create index if not exists api_cache_scope_idx on api_cache(scope);
+create index if not exists api_cache_cached_at_idx on api_cache(cached_at desc);
+
+-- ============================================================
 -- updated_at triggers
 -- ============================================================
 create or replace function touch_updated_at() returns trigger language plpgsql as $$

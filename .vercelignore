@@ -1,0 +1,11 @@
+# Local-only data and caches — Supabase is the source of truth on Vercel
+aeo-results.json
+aeo-results-4017.json
+content-items.json
+ds.json
+semrush-cache.json
+ga4-gsc-tokens.json
+youtube-tokens.json
+start.bat
+start-4017.js
+.env

@@ -267,6 +267,81 @@ function memoryContentToDb(item, onlyProvided = false) {
   return row;
 }
 
+// ============================================================
+// Generic API response cache (SEMrush, PageSpeed, YouTube, etc.)
+// L1: in-process Map keyed by cache_key
+// L2: Supabase api_cache table (persists across restarts)
+// TTL is applied at read time so we don't need a sweeper job.
+// If the api_cache table doesn't exist yet, L2 silently no-ops.
+// ============================================================
+const _l1 = new Map(); // cache_key -> { data, ts }
+let _cacheTableMissing = false; // sticky after the first 42P01
+
+async function cacheGet(cacheKey, ttlSeconds) {
+  const ttlMs = ttlSeconds * 1000;
+  const now = Date.now();
+
+  // L1
+  const mem = _l1.get(cacheKey);
+  if (mem && now - mem.ts < ttlMs) return mem.data;
+
+  // L2 — Supabase
+  if (!USE_SUPABASE || _cacheTableMissing) return null;
+  try {
+    const { data, error } = await supabase
+      .from('api_cache')
+      .select('data, cached_at')
+      .eq('cache_key', cacheKey)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '42P01' || /api_cache/.test(error.message || '')) _cacheTableMissing = true;
+      return null;
+    }
+    if (!data) return null;
+    const ts = new Date(data.cached_at).getTime();
+    if (now - ts >= ttlMs) return null;
+    _l1.set(cacheKey, { data: data.data, ts });
+    return data.data;
+  } catch (e) { return null; }
+}
+
+async function cacheSet(cacheKey, scope, data) {
+  _l1.set(cacheKey, { data, ts: Date.now() });
+  if (!USE_SUPABASE || _cacheTableMissing) return;
+  try {
+    const { error } = await supabase
+      .from('api_cache')
+      .upsert({ cache_key: cacheKey, scope, data, cached_at: new Date().toISOString() });
+    if (error) {
+      if (error.code === '42P01' || /api_cache/.test(error.message || '')) _cacheTableMissing = true;
+    }
+  } catch (e) { /* swallow — cache is best-effort */ }
+}
+
+// Read-but-allow-stale: same as cacheGet but also returns the stale row if
+// the TTL has expired, so callers can fall back to it when the live API fails.
+async function cacheGetWithStale(cacheKey, ttlSeconds) {
+  const ttlMs = ttlSeconds * 1000;
+  const now = Date.now();
+  const mem = _l1.get(cacheKey);
+  if (mem) return { data: mem.data, ts: mem.ts, fresh: now - mem.ts < ttlMs };
+  if (!USE_SUPABASE || _cacheTableMissing) return null;
+  try {
+    const { data, error } = await supabase
+      .from('api_cache')
+      .select('data, cached_at')
+      .eq('cache_key', cacheKey)
+      .maybeSingle();
+    if (error || !data) {
+      if (error?.code === '42P01' || /api_cache/.test(error?.message || '')) _cacheTableMissing = true;
+      return null;
+    }
+    const ts = new Date(data.cached_at).getTime();
+    _l1.set(cacheKey, { data: data.data, ts });
+    return { data: data.data, ts, fresh: now - ts < ttlMs };
+  } catch (e) { return null; }
+}
+
 module.exports = {
   USE_SUPABASE,
   loadAllAeoResults,
@@ -279,5 +354,8 @@ module.exports = {
   getContentItem,
   insertContentItems,
   updateContentItem,
-  deleteContentItem
+  deleteContentItem,
+  cacheGet,
+  cacheSet,
+  cacheGetWithStale
 };
