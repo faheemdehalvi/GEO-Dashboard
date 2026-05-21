@@ -237,15 +237,34 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 
 /* ── Responsive breakpoints ── */
 
-/* JS-rendered tables (GSC country/pages, YouTube videos) inject raw <table>
-   into a container div; the container needs overflow-x so wide tables can
-   scroll instead of overflowing the card. Applied at all sizes — only kicks
-   in when the table naturally exceeds container width. */
-#gsc-country-table, #gsc-pages-table, #yt-videos-table,
-#gsc-keywords-table-wrap, #yt-channels-table-wrap {
+/* JS-rendered tables inject raw <table> into a container div; without an
+   overflow rule the wide table overruns the card on smaller viewports.
+   Catches every .card-body whose id ends in "-table" — covers GSC
+   query-perf / keywords / pages / countries, SEMrush keywords / competitors,
+   YouTube videos, MQLs, Leads Pipeline, Marketing Deals, Demos, Web channel
+   / source / geo / pages. Applied at all sizes — scrollbar only shows when
+   the table actually exceeds container width. */
+.card-body[id$="-table"],
+[id$="-table"]:not(table) {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+/* AEO cards that render their own complete content via JS (no separate
+   header/body split). The Share of Voice tables, model breakdown, heatmap,
+   gap analysis, sources panel, and the two trend chart cards all need to
+   scroll horizontally rather than overflow the card edge. */
+#aeo-sov-card, #aeo-sov-model-card,
+#aeo-platform-card, #aeo-source-card,
+#aeo-heatmap-card, #aeo-gap-analysis-card,
+#aeo-mention-trend-card, #aeo-citation-trend-card {
+  overflow-x: auto;
+}
+
+/* Chart canvases inside cards — Chart.js usually resizes via its responsive
+   option, but a few wrappers have intrinsic widths that overflow narrow
+   parents. Safety scroll. */
+.chart-wrap, .chart-wrap-md { overflow-x: auto; }
 
 /* Resp-detail-grid (Times Mentioned / Cited / Competitor Appeared trio in
    AEO Response Detail panel) needs to collapse on narrow screens. */
