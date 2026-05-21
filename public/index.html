@@ -4599,9 +4599,16 @@ function showRespDetail(run) {
         // Full URL for tooltip — strip UTM for readability
         let tooltipUrl = uri;
         try { const u = new URL(uri); u.searchParams.delete('utm_source'); u.searchParams.delete('utm_medium'); u.searchParams.delete('utm_campaign'); tooltipUrl = u.toString(); } catch(e) {}
-        // For vertexaisearch redirect URIs (Gemini), show the page title as tooltip instead
+        // Gemini grounding-redirect URLs (vertexaisearch.cloud.google.com/...) expire
+        // within 24-48h. As of v2 of callGemini these are resolved to real URLs
+        // server-side, so any source still wearing the redirect is legacy data
+        // (e.g. the April 16 baseline import) — show it blurred + non-clickable.
         const isVertexRedirect = uri && uri.includes('vertexaisearch');
-        const tooltip = (isVertexRedirect ? (title || domain) : (tooltipUrl || domain)).replace(/"/g,'&quot;');
+        if (isVertexRedirect) {
+          const expiredTip = `Gemini grounding link expired (this redirect dies ~24-48h after the stream). Domain attribution is still valid — only the click-through is lost.`.replace(/"/g,'&quot;');
+          return `<span class="resp-source-chip" style="cursor:not-allowed;padding:3px 8px;gap:5px;font-size:12px;opacity:0.5;filter:blur(0.5px);text-decoration:line-through;text-decoration-color:#94A3B8" title="${expiredTip}"><img src="https://www.google.com/s2/favicons?domain=${domain}&sz=12" width="12" height="12" style="flex-shrink:0;filter:grayscale(1)" onerror="this.style.display='none'"><span style="color:#94A3B8">${cleanDomain}</span><span style="font-weight:700;color:#94A3B8">[${num}]</span></span>`;
+        }
+        const tooltip = (tooltipUrl || domain).replace(/"/g,'&quot;');
         return `<span class="resp-source-chip" style="cursor:${uri?'pointer':'default'};padding:3px 8px;gap:5px;font-size:12px" title="${tooltip}" ${uri?`onclick="window.open('${uri}','_blank')"`:''}><img src="https://www.google.com/s2/favicons?domain=${domain}&sz=12" width="12" height="12" style="flex-shrink:0" onerror="this.style.display='none'"><span style="color:var(--text)">${cleanDomain}</span><span style="font-weight:700;color:#2563EB">[${num}]</span></span>`;
       }).join('')}</div>
     </div>` : ''}

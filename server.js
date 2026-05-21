@@ -1381,7 +1381,7 @@ app.post('/api/aeo/stream', async (req, res) => {
     // Extract sources: keep ALL chunks with original index (1-based) — no deduplication
     // so citation markers [n] in text match source numbers
     const chunks = d.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-    const sources = chunks.map((c, i) => {
+    const rawSources = chunks.map((c, i) => {
       const title = c.web?.title || '';
       const uri = c.web?.uri || '';
       // Try to extract real domain from page title (e.g. "Field Service Software | kynection.com.au")
@@ -1395,6 +1395,27 @@ app.post('/api/aeo/stream', async (req, res) => {
       }
       return { index: i + 1, title: title || `Source ${i+1}`, uri, domain };
     });
+
+    // Resolve Gemini's grounding-redirect URLs to their real destinations.
+    // Those redirects (vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+    // expire within ~24-48h so storing them is useless for archival. We HEAD
+    // each one in parallel with a tight timeout; if anything fails the raw
+    // URI is kept as-is rather than blocking the whole response.
+    const sources = await Promise.all(rawSources.map(async (s) => {
+      if (!s.uri || !s.uri.includes('vertexaisearch.cloud.google.com')) return s;
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3500);
+        const r = await fetch(s.uri, { redirect: 'follow', method: 'GET', signal: ctrl.signal });
+        clearTimeout(timer);
+        if (r.url && !r.url.includes('vertexaisearch.cloud.google.com')) {
+          let finalDomain = s.domain;
+          try { finalDomain = new URL(r.url).hostname.replace(/^www\./, ''); } catch(e) {}
+          return { ...s, uri: r.url, domain: finalDomain };
+        }
+      } catch(e) { /* keep raw redirect — it'll show as expired in UI */ }
+      return s;
+    }));
     // Build groundingSupports citation map for inline references
     const supports = d.candidates?.[0]?.groundingMetadata?.groundingSupports || [];
     // Annotate text with citation markers [n] at end of supported segments
