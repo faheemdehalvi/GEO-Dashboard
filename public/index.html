@@ -236,10 +236,38 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 .priority-low  { background:#F1F5F9;color:#475569;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600 }
 
 /* ── Responsive breakpoints ── */
+
+/* JS-rendered tables (GSC country/pages, YouTube videos) inject raw <table>
+   into a container div; the container needs overflow-x so wide tables can
+   scroll instead of overflowing the card. Applied at all sizes — only kicks
+   in when the table naturally exceeds container width. */
+#gsc-country-table, #gsc-pages-table, #yt-videos-table,
+#gsc-keywords-table-wrap, #yt-channels-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Resp-detail-grid (Times Mentioned / Cited / Competitor Appeared trio in
+   AEO Response Detail panel) needs to collapse on narrow screens. */
+@media (max-width: 768px) {
+  .resp-detail-grid { grid-template-columns: 1fr 1fr !important; }
+}
+@media (max-width: 480px) {
+  .resp-detail-grid { grid-template-columns: 1fr !important; }
+}
+
+@media (max-width: 1280px) {
+  /* Roomier modals on smaller laptops — was capped at 460px which felt
+     cramped between 800-1100px viewports. */
+  .modal { max-width: 92vw; }
+}
 @media (max-width: 1024px) {
   #sidebar { width: 180px; min-width: 180px; }
   .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   .chart-grid, .chart-grid-3 { grid-template-columns: 1fr 1fr; }
+  /* Topbar right cluster (date range + custom range panel + refresh) was
+     overflowing the right edge on smaller laptops. */
+  .topbar-right { flex-wrap: wrap; justify-content: flex-end; gap: 6px; row-gap: 6px; }
 }
 @media (max-width: 768px) {
   body { flex-direction: column; height: auto; overflow: auto; }
@@ -257,14 +285,27 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
   .section-hd > div:last-child { flex-wrap: wrap; }
   #aeo-prompt-table { font-size: 11px; }
   .modal { width: 95vw !important; padding: 16px !important; }
-  [style*="display:grid;grid-template-columns:1fr 1fr"] { display: grid !important; grid-template-columns: 1fr !important; }
-  [style*="display:grid;grid-template-columns:1fr 1fr;gap"] { display: grid !important; grid-template-columns: 1fr !important; }
+  /* Catch all 2-col AND 3-col inline grids — the original rule missed 3-col
+     ones in the Add Prompts modal (Topic / Type / Country selectors). */
+  [style*="display:grid;grid-template-columns:1fr 1fr"],
+  [style*="grid-template-columns:1fr 1fr 1fr"],
+  [style*="grid-template-columns: 1fr 1fr 1fr"] { display: grid !important; grid-template-columns: 1fr !important; }
+  /* Stream History rows: stack date/badge, content, edit button instead of
+     squeezing them onto one line. */
+  #aeo-stream-history-body > div { flex-wrap: wrap; gap: 8px; }
+  #aeo-stream-history-body > div > :nth-child(3) { margin-left: auto; }
+  /* Content tab bulk action row — let buttons wrap rather than overflow. */
+  #content-bulk-bar { flex-wrap: wrap; row-gap: 6px; }
 }
 @media (max-width: 480px) {
   .kpi-grid { grid-template-columns: 1fr 1fr; }
   .kpi-value { font-size: 18px; }
   #content { padding: 8px 10px; }
   .tbl th, .tbl td { padding: 7px 8px; }
+  /* Auth overlay: scale down padding so it sits comfortably on 360px devices. */
+  #auth-overlay > div { padding: 28px !important; }
+  /* Topbar title — let it shrink to fit alongside the date selector. */
+  .topbar-title { font-size: 13px; }
 }
 </style>
 </head>
