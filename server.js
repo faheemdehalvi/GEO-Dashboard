@@ -1599,6 +1599,9 @@ app.post('/api/aeo/deep-dive', async (req, res) => {
 
   for (const p of prompts) {
     send({ type: 'progress', done, total, prompt: p.text });
+    // Heartbeat while waiting on Claude so Vercel's edge doesn't drop the SSE
+    // connection during the silent gap.
+    const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
     try {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -1617,6 +1620,8 @@ app.post('/api/aeo/deep-dive', async (req, res) => {
     } catch(e) {
       send({ type: 'error', prompt: p.text, error: e.message });
       done++;
+    } finally {
+      clearInterval(heartbeat);
     }
     await new Promise(r => setTimeout(r, 2000));
   }
@@ -1950,7 +1955,16 @@ CRITICAL REQUIREMENTS:
 
 Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or after the JSON.`;
 
-    const aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000 });
+    // Send SSE comments every 5s while Claude generates so Vercel's edge
+    // proxy doesn't drop the connection during the silent gap. The browser
+    // ignores `:` comment lines per SSE spec, so this is a no-op for the UI.
+    const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
+    let aiResult;
+    try {
+      aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000 });
+    } finally {
+      clearInterval(heartbeat);
+    }
     // Extract JSON from response
     const jsonMatch = aiResult.text.match(/\{[\s\S]*\}/);
     let result = { brief: '', draft: '', meta: '' };
