@@ -6,7 +6,7 @@
       "use": "@vercel/node",
       "config": {
         "includeFiles": "{server.js,db.js,auth.js,snipe-skill.md}",
-        "maxDuration": 60
+        "maxDuration": 300
       }
     },
     { "src": "public/**", "use": "@vercel/static" }

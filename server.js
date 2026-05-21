@@ -1297,8 +1297,9 @@ app.post('/api/aeo/backfill', async (req, res) => {
 app.post('/api/aeo/stream', async (req, res) => {
   const { prompts = [], models = [] } = req.body || {};
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   const send = (d) => { res.write(`data: ${JSON.stringify(d)}\n\n`); };
 
@@ -1587,8 +1588,9 @@ app.post('/api/aeo/deep-dive', async (req, res) => {
   if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set' });
 
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   const send = (d) => { res.write(`data: ${JSON.stringify(d)}\n\n`); };
 
@@ -1872,8 +1874,11 @@ app.post('/api/snipe/generate', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'url required' });
 
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  // Tell upstream proxies (Vercel, Nginx) NOT to buffer so SSE events reach
+  // the browser as they're written rather than after the function returns.
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   const send = (d) => { res.write(`data: ${JSON.stringify(d)}\n\n`); };
 
