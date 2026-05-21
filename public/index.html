@@ -35,10 +35,19 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);displ
 #topbar{background:var(--card);border-bottom:1px solid var(--border);padding:12px 22px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:12px}
 .topbar-title{font-size:15px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-/* Hamburger button — hidden on desktop, visible on mobile via @media */
-#nav-toggle{display:none;background:transparent;border:none;cursor:pointer;color:var(--text);padding:4px;border-radius:6px;margin:-4px 0;flex-shrink:0}
+/* Hamburger button — hidden on desktop, visible on mobile via @media.
+   Three animated bars that morph into an X when body.nav-open is set,
+   giving the user a clear visual signal that tapping again will close. */
+#nav-toggle{display:none;background:transparent;border:none;cursor:pointer;padding:0;flex-shrink:0;position:relative;width:34px;height:34px;border-radius:7px;-webkit-tap-highlight-color:transparent}
 #nav-toggle:hover{background:var(--bg)}
 #nav-toggle:active{background:var(--border)}
+.nav-toggle-bar{position:absolute;left:7px;right:7px;height:2.2px;background:var(--text);border-radius:2px;transition:transform .25s ease, top .25s ease, opacity .15s ease}
+.nav-toggle-bar:nth-child(1){top:10px}
+.nav-toggle-bar:nth-child(2){top:16px}
+.nav-toggle-bar:nth-child(3){top:22px}
+body.nav-open .nav-toggle-bar:nth-child(1){top:16px;transform:rotate(45deg)}
+body.nav-open .nav-toggle-bar:nth-child(2){opacity:0}
+body.nav-open .nav-toggle-bar:nth-child(3){top:16px;transform:rotate(-45deg)}
 
 /* Backdrop behind drawer — hidden on desktop, fades in when nav is open */
 #nav-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,41,0.55);z-index:998;opacity:0;transition:opacity .2s ease;backdrop-filter:blur(2px)}
@@ -298,12 +307,21 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
   .topbar-right { flex-wrap: wrap; justify-content: flex-end; gap: 6px; row-gap: 6px; }
 }
 @media (max-width: 768px) {
-  body { flex-direction: column; height: auto; overflow: auto; }
+  /* Single page-level scroll container (the body) — kills horizontal
+     overflow at the source so no card or wide table can push the whole
+     page sideways. Individual cards still scroll horizontally inside
+     themselves via the .card-body[id$="-table"] rule. */
+  html, body {
+    flex-direction: column;
+    height: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain; /* nicer iOS bounce, no scroll chain into the page */
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
 
-  /* Sidebar becomes a slide-in drawer pinned to the left edge. Stays full
-     vertical layout (not the wrap-horizontal pattern from before — that was
-     cramped with 10 nav items). Hidden by default, slides in when
-     body.nav-open is set by the hamburger button. */
+  /* Sidebar becomes a slide-in drawer pinned to the left edge. */
   #sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; height: 100vh;
     width: 260px; min-width: 260px; max-width: 80vw;
@@ -314,7 +332,7 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
     overflow-y: auto;
   }
   body.nav-open #sidebar { transform: translateX(0); }
-  /* Tap targets are bigger on mobile — easier to thumb-tap accurately */
+  /* Tap targets are bigger on mobile */
   .nav-item { padding: 11px 12px; font-size: 13px; }
   .sb-section { padding: 12px 10px 4px; display: block; }
   .sb-label { display: block; }
@@ -325,9 +343,23 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
   #nav-backdrop { display: block; pointer-events: none; }
   body.nav-open #nav-backdrop { pointer-events: auto; }
 
-  #main { height: auto; overflow: auto; }
-  #content { overflow: visible; padding: 12px 14px; }
-  #topbar { padding: 10px 14px; }
+  /* #main sits in normal flow now — body is the scroll container.
+     min-width:0 stops flex children from forcing parent expansion. */
+  #main { height: auto; overflow: visible; width: 100%; min-width: 0; }
+
+  /* Sticky topbar — stays pinned at the top of the viewport as you scroll.
+     The hamburger is inside it, so it's always reachable. */
+  #topbar {
+    position: sticky; top: 0; z-index: 100;
+    padding: 10px 14px;
+    backdrop-filter: blur(8px);
+    background: rgba(255,255,255,0.92);
+  }
+
+  /* Content area cannot push the page wider than the viewport. Individual
+     cards manage their own internal horizontal scroll. */
+  #content { overflow-x: hidden; padding: 12px 14px; min-width: 0; }
+  #content > * { max-width: 100%; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
   .chart-grid, .chart-grid-3 { grid-template-columns: 1fr; }
   .section-hd { flex-direction: column; align-items: flex-start; gap: 8px; }
@@ -430,7 +462,9 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 <div id="main">
   <div id="topbar">
     <button id="nav-toggle" onclick="toggleMobileNav()" aria-label="Toggle navigation" title="Menu">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+      <span class="nav-toggle-bar"></span>
+      <span class="nav-toggle-bar"></span>
+      <span class="nav-toggle-bar"></span>
     </button>
     <span class="topbar-title" id="topbar-title">Overview</span>
     <div class="topbar-right">
