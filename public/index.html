@@ -29,6 +29,9 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);displ
 .nav-item.active{background:var(--sidebar-active);color:#fff}
 .nav-item .icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
 .sb-bottom{margin-top:auto;padding:12px 14px;border-top:1px solid rgba(255,255,255,.06);font-size:11px;color:#475569;text-align:center}
+#sb-signout-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:8px 12px;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:7px;color:#CBD5E1;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;font-family:'Inter',sans-serif}
+#sb-signout-btn:hover{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:#FCA5A5}
+#sb-signout-btn:active{background:rgba(239,68,68,.18)}
 
 /* ── Main ── */
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -468,7 +471,14 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
     <div class="nav-item" onclick="switchTab('prompts',this)"><span class="icon">💬</span>Prompts</div>
     <div class="nav-item" onclick="switchTab('content',this)"><span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg></span>Content</div>
   </div>
-  <div class="sb-bottom" id="sb-updated">Loading...</div>
+  <div class="sb-bottom">
+    <div id="sb-user-email" style="color:#94A3B8;font-size:11px;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+    <button onclick="authSignOut()" id="sb-signout-btn">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      Sign out
+    </button>
+    <div id="sb-updated" style="margin-top:8px;font-size:10px;color:#475569">Loading...</div>
+  </div>
 </div>
 
 <!-- Mobile-only backdrop for the nav drawer -->
@@ -1295,13 +1305,22 @@ async function authInit() {
   // Handle OAuth callback (?code=... or #access_token=...) before doing anything else
   const { data: { session } } = await _sb.auth.getSession();
   _sbSession = session;
-  _sb.auth.onAuthStateChange((_evt, sess) => { _sbSession = sess; });
+  _sb.auth.onAuthStateChange((_evt, sess) => { _sbSession = sess; populateUserUI(); });
   if (!session) {
     overlay.style.display = 'flex';
     return false;
   }
   overlay.style.display = 'none';
+  populateUserUI();
   return true;
+}
+
+// Reflect the signed-in user's email in the sidebar so the user always
+// knows which account they're on, and the sign-out button has context.
+function populateUserUI() {
+  const emailEl = document.getElementById('sb-user-email');
+  if (!emailEl) return;
+  emailEl.textContent = _sbSession?.user?.email || '';
 }
 
 function showAuthError(msg) {
@@ -1331,6 +1350,7 @@ async function authSignInEmail(e) {
   btn.disabled = false; btn.textContent = 'Sign in';
   if (error) { showAuthError(error.message); return; }
   _sbSession = data.session;
+  populateUserUI();
   document.getElementById('auth-overlay').style.display = 'none';
   // Re-run dashboard init now that we're authenticated
   if (typeof init === 'function') init();
