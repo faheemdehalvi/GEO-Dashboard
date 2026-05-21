@@ -1461,7 +1461,7 @@ app.post('/api/aeo/stream', async (req, res) => {
     return { text, sourceUrls };
   };
 
-  const CALLERS = { 'ChatGPT':callOpenAI, 'Gemini':callGemini, 'AIOverview':callAIOverview };
+  const CALLERS = { 'ChatGPT':callOpenAI, 'Gemini':callGemini, 'AIOverview':callAIOverview, 'Perplexity':callPerplexity };
   const total = prompts.length * models.length;
   let done = 0;
 
