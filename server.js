@@ -54,7 +54,12 @@ const CONFIG = {
     refreshToken: process.env.GOOGLE_REFRESH_TOKEN,
   },
   youtube: {
-    // Kynection YouTube channel owner account (has YouTube Analytics access)
+    // Kynection YouTube channel owner account (has YouTube Analytics access).
+    // Falls back to the main Google OAuth client if dedicated YouTube creds
+    // aren't set — kept so existing deploys without YOUTUBE_CLIENT_ID still
+    // work the same as before.
+    clientId:     process.env.YOUTUBE_CLIENT_ID     || process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.YOUTUBE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET,
     refreshToken: process.env.YOUTUBE_REFRESH_TOKEN,
   },
   ga4: { propertyId: process.env.GA4_PROPERTY_ID || '386242225' },
@@ -108,8 +113,9 @@ async function getToken(key, clientId, clientSecret, refreshToken) {
   return d.access_token;
 }
 const getGoogleToken = () => getToken('google', CONFIG.google.clientId, CONFIG.google.clientSecret, getRefreshToken());
-// YouTube uses a separate token (Kynection channel account — different from GA4/GSC account)
-const getYTToken = () => getToken('youtube', CONFIG.google.clientId, CONFIG.google.clientSecret, getYTRefreshToken());
+// YouTube uses its own OAuth client + refresh token (separate from GA4/GSC
+// because the channel-manager account differs and we own the client here)
+const getYTToken = () => getToken('youtube', CONFIG.youtube.clientId, CONFIG.youtube.clientSecret, getYTRefreshToken());
 
 // ============================================================
 // Helpers
