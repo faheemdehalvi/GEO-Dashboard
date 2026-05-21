@@ -1803,7 +1803,7 @@ function calcCostAUD(model, inputTokens, outputTokens) {
 async function callSnipeAI({ system, user, maxTokens = 600, fast = false }) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || CONFIG.anthropic?.apiKey;
   const OPENAI_KEY    = process.env.OPENAI_API_KEY    || CONFIG.openai?.apiKey;
-  const timeoutMs     = fast ? 20000 : 90000;
+  const timeoutMs     = fast ? 20000 : 240000; // 4 min for full brief/draft/meta — Claude Sonnet 4.5 generating 12K tokens of structured content can take 100-180s on long competitor pages, especially over Vercel's iad1 egress to Anthropic.
 
   const withTimeout = (fetchPromise) => {
     const ctrl = new AbortController();
