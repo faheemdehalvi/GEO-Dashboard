@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kynection Analytics Dashboard</title>
+<title>GEO Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -430,7 +430,7 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 <!-- LOGIN OVERLAY (hidden until auth check runs) -->
 <div id="auth-overlay" style="display:none;position:fixed;inset:0;z-index:99999;background:#0F1729;display:flex;align-items:center;justify-content:center;font-family:Inter,system-ui,sans-serif;color:#fff">
   <div style="background:#1A3A5C;padding:40px;border-radius:12px;width:380px;max-width:92vw;box-shadow:0 20px 60px rgba(0,0,0,.5)">
-    <h1 style="font-size:22px;font-weight:600;margin-bottom:6px">Kynection Dashboard</h1>
+    <h1 style="font-size:22px;font-weight:600;margin-bottom:6px">GEO Dashboard</h1>
     <p id="auth-sub" style="font-size:13px;color:#94A3B8;margin-bottom:24px">Sign in to continue</p>
     <button id="auth-google-btn" onclick="authSignInGoogle()" style="width:100%;padding:12px;background:#fff;color:#1F2937;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:10px">
       <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l5.7-5.7C34 6 29.3 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.6 16 19 13 24 13c3.1 0 5.8 1.1 8 3l5.7-5.7C34 6 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.8-2 13.4-5.2l-6.2-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.2 0-9.6-3.3-11.2-8L6.3 32.8C9.6 39.7 16.3 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.1 5.6l6.2 5.2c-.4.4 6.6-4.8 6.6-14.8 0-1.3-.1-2.4-.4-3.5z"/></svg>
@@ -448,7 +448,7 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 
 <!-- SIDEBAR -->
 <div id="sidebar">
-  <div class="sb-logo"><h1>Kynection</h1><p>Analytics Dashboard v3</p></div>
+  <div class="sb-logo"><h1>Dashboard</h1><p>Analytics Dashboard v3</p></div>
   <div class="sb-section">
     <span class="sb-label">Overview</span>
     <div class="nav-item active" onclick="switchTab('overview',this)"><span class="icon">📈</span>Overview</div>
@@ -3667,12 +3667,12 @@ function renderAEOKPIs() {
   const noData = !curr.has;
 
   const cards = [
-    {l:'Mention %',            v: fmt(curr.mentionPct),      d: ppBadge(curr.mentionPct, prev.mentionPct),       sub: noData ? 'Run Stream Data to populate' : 'Kynection mentioned in response'},
+    {l:'Mention %',            v: fmt(curr.mentionPct),      d: ppBadge(curr.mentionPct, prev.mentionPct),       sub: noData ? 'Run Stream Data to populate' : `${_brandName()} mentioned in response`},
     {l:'Weighted SOV',         v: fmt(curr.weightedSOV),     d: ppBadge(curr.weightedSOV, prev.weightedSOV),     sub: noData ? 'Run Stream Data to populate' : 'Position-weighted (early/mid/late)'},
     {l:'Avg Position',         v: fmtRank(curr.avgPosition), d: rankBadge(curr.avgPosition, prev.avgPosition),   sub: noData ? 'Run Stream Data to populate' : 'Brand rank in response (1=first)'},
     {l:'Mention Gap',          v: fmtGap(curr.mentionGap),   d: ppBadge(curr.mentionGap, prev.mentionGap),       sub: noData ? '—' : 'vs Competitor Mention %', col: gapCol(curr.mentionGap)},
     {l:'Competitor Mention %', v: fmt(curr.compMentionPct),  d: ppBadge(curr.compMentionPct, prev.compMentionPct),sub:'% responses mentioning any competitor'},
-    {l:'Citation %',           v: fmt(curr.citationPct),     d: ppBadge(curr.citationPct, prev.citationPct),     sub: noData ? '—' : 'kynection.com.au as structured source'},
+    {l:'Citation %',           v: fmt(curr.citationPct),     d: ppBadge(curr.citationPct, prev.citationPct),     sub: noData ? '—' : `${_brandDomain()} as structured source`},
     {l:'Prompts Tracked',      v: allPrompts.length,         d: '',                                              sub: `${allTopics.length} topics • ${range ? curr.runsInWindow+' runs in window' : totalRuns+' runs logged'}`},
   ];
 
@@ -3722,9 +3722,11 @@ function renderAEOCharts() {
   }
 
   // ── SOV: count brand mentions across all runs ──────────────────
+  const _sovBrandDom = _brandDomain();
+  const _sovBrandName = _brandName();
   const brandCounts = {};
   allRuns.forEach(r => {
-    if (r.mentioned) brandCounts['kynection.com.au'] = (brandCounts['kynection.com.au'] || 0) + 1;
+    if (r.mentioned) brandCounts[_sovBrandDom] = (brandCounts[_sovBrandDom] || 0) + 1;
     (r.competitorsMentioned || []).forEach(d => { brandCounts[d] = (brandCounts[d] || 0) + 1; });
   });
   const sovTotal = Object.values(brandCounts).reduce((s, v) => s + v, 0);
@@ -3732,7 +3734,7 @@ function renderAEOCharts() {
     .map(([domain, count]) => ({ domain, count, pct: sovTotal ? (count / sovTotal * 100) : 0 }))
     .sort((a, b) => b.pct - a.pct);
 
-  const brandLabel = d => d === 'kynection.com.au' ? 'Kynection' : (AEO_COMP_NAMES[d] || d.split('.')[0].replace(/^\w/, c => c.toUpperCase()));
+  const brandLabel = d => d === _sovBrandDom ? _sovBrandName : (AEO_COMP_NAMES[d] || d.split('.')[0].replace(/^\w/, c => c.toUpperCase()));
 
   // Per-brand avg position and weighted SOV
   const brandStats = {};
@@ -3745,7 +3747,7 @@ function renderAEOCharts() {
       if (rank != null) { brandStats[domain].rankSum += rank; brandStats[domain].rankN++; }
     };
     const kPosW = r.mentionPosition === 'early' ? 3 : r.mentionPosition === 'mid' ? 2 : r.mentionPosition === 'late' ? 1 : 0;
-    addStat('kynection.com.au', r.mentioned, r.mentionRank, kPosW, r.cited);
+    addStat(_sovBrandDom, r.mentioned, r.mentionRank, kPosW, r.cited);
     (r.competitorsMentioned || []).forEach(d => addStat(d, true, null, 1, false));
   });
 
@@ -3765,8 +3767,8 @@ function renderAEOCharts() {
           </tr></thead>
           <tbody>
           ${sovSorted.map((b, i) => {
-            const isKyn = b.domain === 'kynection.com.au';
-            const kynPct = sovSorted.find(x => x.domain === 'kynection.com.au')?.pct || 0;
+            const isKyn = b.domain === _sovBrandDom;
+            const kynPct = sovSorted.find(x => x.domain === _sovBrandDom)?.pct || 0;
             const mentionGap = (b.pct - kynPct).toFixed(1);
             const gapColor = isKyn ? '' : parseFloat(mentionGap) > 0 ? 'color:#EF4444' : 'color:#10B981';
             return `<tr style="border-bottom:1px solid #F1F5F9;${isKyn?'background:#F0F6FF':''}">
@@ -3919,7 +3921,7 @@ function showAEOInfoModal(type) {
       title: 'Share of Voice by Model',
       sub: "Your brand's visibility across different AI models.",
       body: `<p><strong>What is SOV by Model?</strong><br>This breaks down your Share of Voice performance across each individual AI model (ChatGPT, Gemini, etc.), showing where your brand performs best.</p>
-<p><strong>How it's calculated</strong><br>For each AI model, we calculate Kynection's mentions divided by total mentions (Kynection + all competitors) for that specific model.</p>
+<p><strong>How it's calculated</strong><br>For each AI model, we calculate your brand's mentions divided by total mentions (your brand + all competitors) for that specific model.</p>
 <div style="background:#F8FAFC;border-radius:8px;padding:14px;text-align:center;margin:12px 0;font-size:14px">Model SOV = (Your Mentions on Model / Total Mentions on Model) × 100</div>
 <p><strong>Why it matters</strong><br>Different AI models may have different knowledge about your brand. This breakdown helps identify which models favour your content and where optimisation opportunities exist.</p>`
     },
@@ -3932,12 +3934,12 @@ function showAEOInfoModal(type) {
 <p><strong>How Absolute is calculated</strong><br>Absolute Rate divides your mentions by all AI responses.</p>
 <div style="background:#F8FAFC;border-radius:8px;padding:14px;text-align:center;margin:12px 0;font-size:14px">Absolute Rate = (Your Mentions / All Responses) × 100</div>
 <p><strong>When to use each</strong><br>Use Relative to measure competitive position within your industry. Use Absolute to measure overall brand reach across all AI conversations.</p>
-<p><strong>Chart lines</strong><br><span style="color:#5B6CF9;font-weight:600">Blue</span> = Kynection mention rate &nbsp;|&nbsp; <span style="color:#F97316;font-weight:600">Orange</span> = Competitor mention rate (% of responses mentioning any competitor)</p>`
+<p><strong>Chart lines</strong><br><span style="color:#5B6CF9;font-weight:600">Blue</span> = your brand mention rate &nbsp;|&nbsp; <span style="color:#F97316;font-weight:600">Orange</span> = Competitor mention rate (% of responses mentioning any competitor)</p>`
     },
     'citation-rate': {
       title: 'Citation Rate',
       sub: 'Citation Rate measures how often your domain is cited in AI responses.',
-      body: `<p><strong>What is Citation Rate?</strong><br>Citation Rate shows the percentage of AI responses that include a citation to your domain (kynection.com or kynection.com.au).</p>
+      body: `<p><strong>What is Citation Rate?</strong><br>Citation Rate shows the percentage of AI responses that include a citation to your domain.</p>
 <p><strong>How it's calculated</strong><br>The percentage is calculated by dividing the number of responses where your domain is cited by the total number of responses, then multiplying by 100.</p>
 <div style="background:#F8FAFC;border-radius:8px;padding:14px;text-align:center;margin:12px 0;font-size:14px">Citation Rate = (Responses With Your Domain Cited / All Responses) × 100</div>
 <p><strong>Chart lines</strong><br><span style="color:#5B6CF9;font-weight:600">Blue</span> = Citation Rate (domain appears as a source) &nbsp;|&nbsp; <span style="color:#F97316;font-weight:600">Orange</span> = Attributed Citation (cited AND referenced in context)</p>
@@ -4025,7 +4027,7 @@ function renderAEORateTrends() {
         <span style="font-size:12px;color:var(--muted);margin-left:8px;cursor:help;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px" data-tooltip="Average of daily mention rates across the selected period. Each day is weighted equally regardless of run count — this may differ slightly from the Mention % KPI above, which uses total mentions ÷ total runs.">average mention rate</span>
       </div>
       <div style="flex:1;min-height:0;position:relative"><canvas id="aeo-mention-chart" style="width:100%!important;height:100%!important"></canvas></div>
-      ${legend([['#5B6CF9','Kynection'],['#F97316','Competitors']])}
+      ${legend([['#5B6CF9',_brandName()],['#F97316','Competitors']])}
     </div>`;
 
   citationCard.style.display = 'flex';
@@ -4038,7 +4040,7 @@ function renderAEORateTrends() {
         <span style="font-size:12px;color:var(--muted);margin-left:8px;cursor:help;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px" data-tooltip="Average of daily citation rates across the selected period. Each day is weighted equally regardless of run count — this may differ slightly from the Citation % KPI above, which uses total attributed citations ÷ total runs.">average citation rate</span>
       </div>
       <div style="flex:1;min-height:0;position:relative"><canvas id="aeo-citation-chart" style="width:100%!important;height:100%!important"></canvas></div>
-      ${legend([['#5B6CF9','Kynection'],['#F97316','Competitors']])}
+      ${legend([['#5B6CF9',_brandName()],['#F97316','Competitors']])}
     </div>`;
 
   const scaleOpts = {
@@ -4053,10 +4055,10 @@ function renderAEORateTrends() {
     S.charts['aeo-mention'] = new Chart(ctx3, {
       type: 'line',
       data: { labels, datasets: [
-        { label: 'Kynection',   data: kynMentionRate,  borderColor: '#5B6CF9', backgroundColor: 'rgba(91,108,249,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 },
+        { label: _brandName(), data: kynMentionRate,  borderColor: '#5B6CF9', backgroundColor: 'rgba(91,108,249,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 },
         { label: 'Competitors', data: compMentionRate, borderColor: '#F97316', backgroundColor: 'rgba(249,115,22,0.05)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 }
       ]},
-      options: { plugins: pluginOpts(['Kynection','Competitors']), scales: scaleOpts, animation: { duration: 500 } }
+      options: { plugins: pluginOpts([_brandName(),'Competitors']), scales: scaleOpts, animation: { duration: 500 } }
     });
   }
 
@@ -4066,10 +4068,10 @@ function renderAEORateTrends() {
     S.charts['aeo-citation'] = new Chart(ctx4, {
       type: 'line',
       data: { labels, datasets: [
-        { label: 'Kynection',    data: kynCitationRate,  borderColor: '#5B6CF9', backgroundColor: 'rgba(91,108,249,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 },
-        { label: 'Competitors',  data: compCitationRate, borderColor: '#F97316', backgroundColor: 'rgba(249,115,22,0.05)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 }
+        { label: _brandName(),  data: kynCitationRate,  borderColor: '#5B6CF9', backgroundColor: 'rgba(91,108,249,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 },
+        { label: 'Competitors', data: compCitationRate, borderColor: '#F97316', backgroundColor: 'rgba(249,115,22,0.05)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5 }
       ]},
-      options: { plugins: pluginOpts(['Kynection','Competitors']), scales: scaleOpts, animation: { duration: 500 } }
+      options: { plugins: pluginOpts([_brandName(),'Competitors']), scales: scaleOpts, animation: { duration: 500 } }
     });
   }
 }
@@ -4080,7 +4082,7 @@ function renderAEOHeatmap() {
   if (!card) return;
 
   const HMAP_NAMES = {
-    'kynection.com.au':'Kynection','aroflo.com':'AroFlo','assignar.com':'Assignar',
+    'aroflo.com':'AroFlo','assignar.com':'Assignar',
     'ascora.com.au':'Ascora','capterra.com':'Capterra','commusoft.com':'Commusoft',
     'corrigo.com':'Corrigo','deputy.com':'Deputy','fergus.com':'Fergus',
     'fieldinsight.com':'FieldInsight','fleetcomplete.com':'Fleet Complete',
@@ -4092,7 +4094,11 @@ function renderAEOHeatmap() {
     'transvirtual.com':'Transvirtual','verizonconnect.com':'Verizon Connect',
     'workbenchcentral.com':'Workbench'
   };
-  const brandLabel = d => HMAP_NAMES[d] || d.split('.')[0].replace(/^\w/, c => c.toUpperCase());
+  // brandLabel: tenant's own domain → tenant brand name; otherwise look up
+  // the static competitor name map or derive from the domain root.
+  const _bDom = _brandDomain();
+  const _bName = _brandName();
+  const brandLabel = d => (d === _bDom) ? _bName : (HMAP_NAMES[d] || d.split('.')[0].replace(/^\w/, c => c.toUpperCase()));
 
   const header = `<div class="card-header" style="margin-bottom:0">
     <div>
@@ -4111,10 +4117,11 @@ function renderAEOHeatmap() {
   }
 
   // Collect competitors that actually appear in runs, sorted by total mentions desc
+  const brandDom = _brandDomain();
   const compCount = {};
   allRuns.forEach(r => (r.competitorsMentioned || []).forEach(d => { compCount[d] = (compCount[d] || 0) + 1; }));
   const compList = Object.entries(compCount).sort((a, b) => b[1] - a[1]).map(([d]) => d);
-  const columns  = ['kynection.com.au', ...compList];
+  const columns  = [brandDom, ...compList];
 
   const mode = window._aeoHeatmapMode || 'mention';
 
@@ -4124,11 +4131,11 @@ function renderAEOHeatmap() {
     if (!topicRuns.length) return null;
     let count;
     if (mode === 'mention') {
-      count = domain === 'kynection.com.au'
+      count = domain === brandDom
         ? topicRuns.filter(r => r.mentioned).length
         : topicRuns.filter(r => (r.competitorsMentioned || []).includes(domain)).length;
     } else {
-      count = domain === 'kynection.com.au'
+      count = domain === brandDom
         ? topicRuns.filter(r => r.cited).length
         : topicRuns.filter(r => (r.sourceUrls || []).some(s => (s.domain || '').includes(domain.split('.')[0]) || (s.uri || '').includes(domain))).length;
     }
@@ -4161,7 +4168,7 @@ function renderAEOHeatmap() {
               <th style="min-width:110px;padding:10px 8px;text-align:center;border-bottom:1px solid var(--border)">
                 <div style="display:flex;flex-direction:column;align-items:center;gap:5px">
                   <img src="https://www.google.com/s2/favicons?domain=${d}&sz=20" width="20" height="20" style="border-radius:4px" onerror="this.style.display='none'">
-                  <span style="font-size:11px;font-weight:${d==='kynection.com.au'?'700':'500'};color:var(--text)">${brandLabel(d)}</span>
+                  <span style="font-size:11px;font-weight:${d===brandDom?'700':'500'};color:var(--text)">${brandLabel(d)}</span>
                 </div>
               </th>`).join('')}
           </tr>
@@ -4169,14 +4176,14 @@ function renderAEOHeatmap() {
         <tbody>
           ${topics.map((topic, ti) => {
             const rowBg = ti % 2 === 0 ? '' : 'background:rgba(0,0,0,0.01)';
-            const kynVal = getCellValue(topic, 'kynection.com.au');
+            const kynVal = getCellValue(topic, brandDom);
             const anyCompetitorPresent = compList.some(d => (getCellValue(topic, d) || 0) > 0);
             const kynIsDanger = kynVal === 0 && anyCompetitorPresent;
             return `<tr style="${rowBg}">
-              <td style="padding:9px 14px;font-size:12px;font-weight:500;border-bottom:1px solid var(--border);position:sticky;left:0;background:${ti%2===0?'var(--card)':'#FAFAFA'};z-index:1;white-space:nowrap">${topic}${kynIsDanger ? ' <span title="Kynection absent but competitors cited" style="color:#DC2626;font-size:10px">⚠</span>' : ''}</td>
+              <td style="padding:9px 14px;font-size:12px;font-weight:500;border-bottom:1px solid var(--border);position:sticky;left:0;background:${ti%2===0?'var(--card)':'#FAFAFA'};z-index:1;white-space:nowrap">${topic}${kynIsDanger ? ` <span title="${_brandName()} absent but competitors cited" style="color:#DC2626;font-size:10px">⚠</span>` : ''}</td>
               ${columns.map(d => {
                 const val = getCellValue(topic, d);
-                const isDanger = d === 'kynection.com.au' && kynIsDanger;
+                const isDanger = d === brandDom && kynIsDanger;
                 const txt = val === null ? '—' : val.toFixed(1) + '%';
                 return `<td style="padding:9px 8px;text-align:center;font-size:12px;border-bottom:1px solid var(--border);${cellStyle(val, isDanger)}">${txt}</td>`;
               }).join('')}
@@ -4248,13 +4255,13 @@ function renderAEOGapAnalysis() {
   const header = `<div style="padding:20px 20px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
     <div>
       <div style="font-size:15px;font-weight:700;color:#DC2626">Gap Analysis <span style="font-size:11px;font-weight:400;color:var(--muted);margin-left:6px">${gaps.length} gap${gaps.length!==1?'s':''} identified</span></div>
-      <div style="font-size:12px;color:var(--muted);margin-top:2px">Prompts where Kynection is absent but competitors are cited${dateSuffix}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px">Prompts where ${_brandName()} is absent but competitors are cited${dateSuffix}</div>
     </div>
     ${gaps.length ? `<button class="btn btn-sm" style="background:#FEF2F2;color:#DC2626;border:1px solid #FECACA;white-space:nowrap;flex-shrink:0" onclick="showDeepDiveModal()">Run Deep-Dive</button>` : ''}
   </div>`;
 
   if (!gaps.length) {
-    card.innerHTML = header + `<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">No citation gaps detected — Kynection is present across all tracked prompts.</div>`;
+    card.innerHTML = header + `<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">No citation gaps detected — ${_brandName()} is present across all tracked prompts.</div>`;
     return;
   }
 
@@ -4302,13 +4309,11 @@ function renderAEOGapAnalysis() {
   // ── Section 2: Content Gap Recommendations ──
   const priorityBadge = v => v >= 0.4 ? '<span class="priority-high">HIGH</span>' : v >= 0.15 ? '<span class="priority-med">MED</span>' : '<span class="priority-low">LOW</span>';
   const recContent = (prompt, comps) => {
-    const q = prompt.text?.toLowerCase() || '';
+    const bName = _brandName();
+    const topComp = comps[0]?.label || 'competitors';
     const recs = [];
-    if (q.includes('fleet') || q.includes('vehicle') || q.includes('tracking')) recs.push('Publish a comparison page: Kynection Fleet Management vs ' + (comps[0]?.label || 'competitors'));
-    if (q.includes('job') || q.includes('field') || q.includes('service')) recs.push('Create a "Best Field Service Software in Australia" guide featuring Kynection capabilities');
-    if (q.includes('safety') || q.includes('compliance') || q.includes('whs')) recs.push('Develop a WHS compliance content hub with Kynection as the solution');
-    if (q.includes('small') || q.includes('tradie') || q.includes('trade')) recs.push('Write tradesperson-focused landing pages covering Kynection for trades');
-    if (!recs.length) recs.push(`Create authoritative content targeting "${prompt.topic}" — address buyer questions AI responds to`);
+    recs.push(`Publish a comparison page: ${bName} vs ${topComp} for "${prompt.topic}"`);
+    recs.push(`Create authoritative content targeting "${prompt.topic}" — address the specific buyer questions AI responds to`);
     recs.push('Build a structured FAQ page for this topic with schema markup to improve AI citation likelihood');
     return recs.slice(0, 2);
   };
@@ -4351,7 +4356,7 @@ function renderAEOPlatformBreakdown() {
   const allRuns = Object.values(_aeoResults).flatMap(p => p.runs || []);
   const header = `<div style="padding:20px 20px 6px;border-bottom:1px solid var(--border);margin-bottom:16px">
     <div style="font-size:14px;font-weight:600;color:var(--text)">Platform Breakdown</div>
-    <div style="font-size:12px;color:var(--muted);margin-top:2px">Kynection's visibility performance per AI model</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:2px">${_brandName()}'s visibility performance per AI model</div>
   </div>`;
   if (!allRuns.length) { card.innerHTML = header + '<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px">No data yet — run Stream Data first.</div>'; return; }
 
@@ -4478,7 +4483,7 @@ function ddModeChange() {
     searchRow.style.display = 'none';
     listEl.innerHTML = gaps.length
       ? `<div style="padding:12px 14px;background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;font-size:12px;color:#991B1B">
-           Will analyse all <strong>${gaps.length} gap prompt${gaps.length!==1?'s':''}</strong> — prompts where Kynection was absent and competitors were cited.
+           Will analyse all <strong>${gaps.length} gap prompt${gaps.length!==1?'s':''}</strong> — prompts where ${_brandName()} was absent and competitors were cited.
          </div>`
       : `<div style="padding:12px 14px;font-size:12px;color:var(--muted);text-align:center">No gap prompts found. Stream data first.</div>`;
   } else {
@@ -4522,7 +4527,7 @@ function showDeepDiveModal() {
     <div style="background:var(--card);border-radius:14px;padding:28px 32px;max-width:620px;width:90%;max-height:90vh;overflow-y:auto;position:relative">
       <button onclick="document.getElementById('deep-dive-overlay').remove()" style="position:absolute;top:14px;right:16px;background:none;border:none;font-size:22px;cursor:pointer;color:var(--muted)">×</button>
       <h3 style="margin:0 0 4px;font-size:17px;color:#DC2626">Deep-Dive Analysis</h3>
-      <p style="font-size:13px;color:var(--muted);margin:0 0 16px">Uses Claude to explain WHY Kynection was excluded from each gap prompt, with specific content recommendations.</p>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 16px">Uses Claude to explain WHY ${_brandName()} was excluded from each gap prompt, with specific content recommendations.</p>
       <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:12px;color:#991B1B">
         <strong>${gaps.length} gap prompt${gaps.length!==1?'s':''} identified</strong> from data last run on <strong>${lastDate ? fmtDate(lastDate) : 'unknown date'}</strong>.<br>
         <span style="margin-top:4px;display:block">Cost: ~$0.04 per prompt via Claude API.</span>
@@ -5377,6 +5382,19 @@ async function runStreamNow() {
 // backward compat when tenant === 'kyn'.
 function _customPromptsKey() {
   return (_tenant || 'kyn') + '_aeo_custom_prompts';
+}
+
+// Tenant-aware brand helpers — used everywhere the AEO charts, heatmaps,
+// KPIs, gap card, and info modals reference the active brand. Without
+// these, IR shows "Kynection" labels because the visual layer was written
+// for the single-tenant era.
+function _brandName() {
+  const cfg = _tenants && _tenants.find(t => t.slug === _tenant);
+  return cfg?.brand?.name || 'Kynection';
+}
+function _brandDomain() {
+  const cfg = _tenants && _tenants.find(t => t.slug === _tenant);
+  return (cfg?.brand?.domain || 'kynection.com.au').toLowerCase();
 }
 
 // One-time forced wipe of IR's custom prompts — clears the garbled batch
