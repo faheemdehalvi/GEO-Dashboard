@@ -194,6 +194,23 @@ app.get('/api/_diag/db', (req, res) => {
   }
   res.json({ tenants: out, processCwd: process.cwd(), nodeVersion: process.version });
 });
+
+// Public diagnostic — hits loadAllAeoResults for a tenant and returns the
+// count. No secrets exposed. Confirms whether the data layer is actually
+// returning prompts (independent of auth and frontend). Hit:
+//   /api/_diag/aeo?tenant=ir
+app.get('/api/_diag/aeo', async (req, res) => {
+  const tenant = (req.query.tenant || 'ir').toLowerCase();
+  try {
+    const data = await db.forTenant(tenant, () => db.loadAllAeoResults());
+    const ids = Object.keys(data || {});
+    const totalRuns = Object.values(data || {}).reduce((s, e) => s + (e.runs?.length || 0), 0);
+    const first = ids.length ? { id: ids[0], prompt: data[ids[0]]?.prompt?.slice(0, 80), topic: data[ids[0]]?.topic, tag: data[ids[0]]?.tag, runs: data[ids[0]]?.runs?.length || 0 } : null;
+    res.json({ tenant, promptCount: ids.length, totalRuns, firstPrompt: first });
+  } catch (e) {
+    res.status(500).json({ tenant, error: e.message });
+  }
+});
 app.get('/api/config', (req, res) => res.json({
   tenant: req.tenant,
   brand: req.config.brand,
