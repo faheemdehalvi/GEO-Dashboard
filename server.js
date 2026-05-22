@@ -1374,7 +1374,24 @@ function checkMentions(text, opts = {}) {
   return { mentioned, cited, attributedCitation, sources, competitorsMentioned, mentionPosition, mentionRank, sentiment };
 }
 
-app.get('/api/aeo/results', (req, res) => res.json(aeoResultsFor(req)));
+app.get('/api/aeo/results', async (req, res) => {
+  // Always load fresh from Supabase. The in-memory _aeoResultsByTenant
+  // cache hydrates async at module boot and is unreliable on Vercel
+  // serverless cold starts — a request on a cold function would get
+  // an empty {} before hydration completes, producing a blank Prompts
+  // tab even though the data exists in Supabase. Refreshing the cache
+  // here keeps subsequent in-process accesses fast while guaranteeing
+  // the response is correct on every request.
+  try {
+    const data = await db.forTenant(req.tenant, () => db.loadAllAeoResults());
+    _aeoResultsByTenant[req.tenant] = data;
+    res.json(data);
+  } catch (e) {
+    // Supabase blip — fall back to whatever's in the in-memory cache
+    console.warn(`/api/aeo/results [${req.tenant}] load failed:`, e.message);
+    res.json(aeoResultsFor(req));
+  }
+});
 
 // ── Competitors ───────────────────────────────────────────────
 app.get('/api/aeo/competitors', async (req, res) => {
