@@ -5440,7 +5440,7 @@ function getAllPrompts() {
   const seen = new Set([...base, ...custom].map(p => (p.text || '').toLowerCase().trim()));
   const fromDb = [];
   try {
-    if (window._aeoResults && typeof _aeoResults === 'object') {
+    if (_aeoResults && typeof _aeoResults === 'object') {
       for (const [id, entry] of Object.entries(_aeoResults)) {
         const text = (entry?.prompt || '').trim();
         if (!text) continue;
