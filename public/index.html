@@ -492,6 +492,7 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
       <span class="nav-toggle-bar"></span>
       <span class="nav-toggle-bar"></span>
     </button>
+    <select id="tenant-toggle" onchange="setTenant(this.value)" title="Switch dashboard" style="display:none;font-size:12px;padding:5px 10px;border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--text);font-weight:500;cursor:pointer;flex-shrink:0"></select>
     <span class="topbar-title" id="topbar-title">Overview</span>
     <div class="topbar-right">
       <span class="status-dot"></span>
@@ -1321,6 +1322,52 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
 // ══════════════════════════════════════════════════════════════
 let _sb = null;           // Supabase client (created after config fetched)
 let _sbSession = null;    // current session { access_token, user, ... }
+let _tenants = [];        // [{slug, brand, title, enabledSections}, ...]
+let _tenant  = (localStorage.getItem('geo_tenant') || 'kyn'); // current tenant slug
+
+function setTenant(slug) {
+  if (slug === _tenant) return;
+  _tenant = slug;
+  localStorage.setItem('geo_tenant', slug);
+  // Hard reload — simplest and safest way to flush all per-tab caches that
+  // were populated under the previous tenant (AEO results, content items,
+  // chart state, etc.).
+  location.reload();
+}
+
+function applyTenantConfig() {
+  const cfg = _tenants.find(t => t.slug === _tenant) || _tenants[0];
+  if (!cfg) return;
+  // Set page + topbar title based on tenant
+  try { document.title = cfg.title; } catch(e) {}
+  // Hide nav items not in this tenant's enabledSections
+  const enabled = new Set(cfg.enabledSections);
+  document.querySelectorAll('.nav-item').forEach(el => {
+    const m = (el.getAttribute('onclick') || '').match(/switchTab\('([^']+)'/);
+    if (!m) return;
+    const tab = m[1];
+    el.style.display = enabled.has(tab) ? '' : 'none';
+  });
+  // Hide entire .sb-section blocks whose nav items are all hidden
+  document.querySelectorAll('.sb-section').forEach(sec => {
+    const items = sec.querySelectorAll('.nav-item');
+    if (!items.length) return;
+    const anyVisible = [...items].some(i => i.style.display !== 'none');
+    sec.style.display = anyVisible ? '' : 'none';
+  });
+  // Update sidebar brand label
+  const logoH1 = document.querySelector('.sb-logo h1');
+  if (logoH1) logoH1.textContent = cfg.brand.name || 'Dashboard';
+}
+
+function populateTenantToggle() {
+  const sel = document.getElementById('tenant-toggle');
+  if (!sel || !_tenants.length) return;
+  if (_tenants.length < 2) { sel.style.display = 'none'; return; }
+  sel.innerHTML = _tenants.map(t => `<option value="${t.slug}">${escapeHtml ? escapeHtml(t.brand.name) : t.brand.name}</option>`).join('');
+  sel.value = _tenant;
+  sel.style.display = '';
+}
 
 async function authInit() {
   const overlay = document.getElementById('auth-overlay');
@@ -1331,6 +1378,14 @@ async function authInit() {
     showAuthError('Cannot reach server: ' + e.message);
     overlay.style.display = 'flex';
     return false;
+  }
+  // Hydrate the tenant list + apply config to nav/sidebar BEFORE the auth gate.
+  // Even unauthenticated users should see the right brand on the login overlay.
+  if (Array.isArray(cfg.tenants) && cfg.tenants.length) {
+    _tenants = cfg.tenants;
+    if (!_tenants.find(t => t.slug === _tenant)) _tenant = _tenants[0].slug;
+    populateTenantToggle();
+    applyTenantConfig();
   }
   if (!cfg.supabaseUrl || !cfg.supabasePublishableKey) {
     // Auth not configured on server — proceed without it (dev mode)
@@ -1407,10 +1462,13 @@ window.fetch = async function(input, init) {
   const url = typeof input === 'string' ? input : (input?.url || '');
   const isApi = url.startsWith('/api/') || url.includes(location.host + '/api/');
   const isPublic = url.includes('/api/auth/config') || url.includes('/api/health');
-  if (isApi && !isPublic && _sbSession?.access_token) {
+  if (isApi) {
     init = init || {};
     const headers = new Headers(init.headers || {});
-    if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + _sbSession.access_token);
+    if (!headers.has('x-tenant')) headers.set('x-tenant', _tenant);
+    if (!isPublic && _sbSession?.access_token && !headers.has('Authorization')) {
+      headers.set('Authorization', 'Bearer ' + _sbSession.access_token);
+    }
     init.headers = headers;
   }
   const res = await _originalFetch(input, init);

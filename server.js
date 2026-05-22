@@ -21,10 +21,21 @@ try {
 
 const db = require('./db');
 const { requireAuth } = require('./auth');
+const { buildConfig, resolveTenant, KNOWN_TENANTS } = require('./tenant');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Tenant resolution — every /api/* request reads the x-tenant header
+// ("kyn" | "ir"), populates req.tenant + req.config, and runs downstream
+// middleware/handlers inside an AsyncLocalStorage context so db.js can
+// resolve the right Supabase data client without thread-through args.
+app.use('/api', (req, res, next) => {
+  req.tenant = resolveTenant(req.headers['x-tenant']);
+  req.config = buildConfig(req.tenant);
+  db.tenantStorage.run(req.tenant, () => next());
+});
 
 // Auth gate: every /api/* route requires a valid Supabase JWT EXCEPT the
 // small set of public sub-paths listed below. Place this BEFORE all route
@@ -38,11 +49,26 @@ app.use('/api', (req, res, next) => {
   return requireAuth(req, res, next);
 });
 
-// Public: lets the frontend bootstrap its Supabase client
-app.get('/api/auth/config', (req, res) => res.json({
-  supabaseUrl:            process.env.SUPABASE_URL || null,
-  supabasePublishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || null
-}));
+// Public: lets the frontend bootstrap its Supabase client AND learn what
+// tenants are configured so it can render the tenant switcher + filter the
+// nav per tenant's enabledSections.
+app.get('/api/auth/config', (req, res) => {
+  const tenants = KNOWN_TENANTS.map(t => {
+    const cfg = buildConfig(t);
+    return {
+      slug: t,
+      brand: cfg.brand,
+      title: cfg.title,
+      enabledSections: cfg.enabledSections
+    };
+  });
+  res.json({
+    // Auth uses the primary (Kynection) Supabase — see auth.js + db.js
+    supabaseUrl:            process.env.SUPABASE_URL || null,
+    supabasePublishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || null,
+    tenants
+  });
+});
 
 // ============================================================
 // CONFIG
