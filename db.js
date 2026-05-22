@@ -40,8 +40,13 @@ const _persistenceLogged = {}; // tenant -> bool (once-per-tenant startup log)
 function getClient(tenant = 'kyn') {
   if (_clients[tenant] !== undefined) return _clients[tenant];
   const prefix = tenant.toUpperCase() + '_';
-  const url = process.env[prefix + 'SUPABASE_URL'] || process.env.SUPABASE_URL;
-  const key = process.env[prefix + 'SUPABASE_SERVICE_ROLE_KEY'] || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Kynection accepts the bare SUPABASE_URL for backward compatibility with
+  // the original single-tenant deploy. Every other tenant MUST use
+  // <TENANT>_SUPABASE_URL — silently falling back to the bare var would
+  // route their data through Kynection's Supabase, which has already burned
+  // us once (IR board showed Kynection's prompts in production).
+  const url = process.env[prefix + 'SUPABASE_URL'] || (tenant === 'kyn' ? process.env.SUPABASE_URL : null);
+  const key = process.env[prefix + 'SUPABASE_SERVICE_ROLE_KEY'] || (tenant === 'kyn' ? process.env.SUPABASE_SERVICE_ROLE_KEY : null);
   if (url && key) {
     _clients[tenant] = createClient(url, key, { auth: { persistSession: false } });
     if (!_persistenceLogged[tenant]) {
@@ -51,7 +56,7 @@ function getClient(tenant = 'kyn') {
   } else {
     _clients[tenant] = null;
     if (!_persistenceLogged[tenant]) {
-      console.log(`🗄️  Persistence [${tenant}]: local JSON files (set ${prefix}SUPABASE_URL + ${prefix}SUPABASE_SERVICE_ROLE_KEY to use Supabase)`);
+      console.warn(`⚠ Persistence [${tenant}]: NO Supabase configured. Set ${prefix}SUPABASE_URL + ${prefix}SUPABASE_SERVICE_ROLE_KEY. Falling back to local JSON files (only works in dev — Vercel functions are stateless).`);
       _persistenceLogged[tenant] = true;
     }
   }
