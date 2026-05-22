@@ -1358,6 +1358,13 @@ function applyTenantConfig() {
   // Update sidebar brand label
   const logoH1 = document.querySelector('.sb-logo h1');
   if (logoH1) logoH1.textContent = cfg.brand.name || 'Dashboard';
+  // Show/hide the Revamp tile in the +Content modal based on tenant's
+  // contentFeatures list (only IR has revamp enabled in commit #3).
+  const revampTile = document.getElementById('content-action-revamp-tile');
+  if (revampTile) {
+    const features = cfg.contentFeatures || ['snipe'];
+    revampTile.style.display = features.includes('revamp') ? '' : 'none';
+  }
 }
 
 function populateTenantToggle() {
@@ -5689,6 +5696,7 @@ function renderContentTable() {
       const date=[(d.getMonth()+1).toString().padStart(2,'0'),d.getDate().toString().padStart(2,'0'),(d.getFullYear()+'').slice(2)].join('/');
       const hasSnipe=!!(item.snipe && (item.snipe.brief||item.snipe.draft));
       const isSnipe = item.snipeType==='snipe';
+      const isRevamp = item.snipeType==='revamp';
       const published = !!(item.published);
       const publishedUrl = item.publishedUrl || '';
       // Published URL cell — blank until published
@@ -5696,19 +5704,21 @@ function renderContentTable() {
         ? `<div style="display:flex;align-items:center;gap:6px"><img src="https://www.google.com/s2/favicons?domain=${(()=>{try{return new URL(publishedUrl).hostname}catch(e){return ''}})()}&sz=16" width="14" height="14" style="border-radius:2px;flex-shrink:0" onerror="this.style.display='none'"><a href="${publishedUrl}" target="_blank" style="color:#5B6CF9;text-decoration:none;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px;display:block" title="${publishedUrl}">${publishedUrl.replace(/^https?:\/\//,'').replace(/\/$/,'')}</a></div>`
         : `<span style="color:#CBD5E1;font-size:13px">—</span>`;
       // Content cell — clickable, opens drawer
-      const snipeBadge = isSnipe
+      const snipeBadge = isRevamp
+        ? `<span style="background:#ECFDF5;color:#10B981;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.3px;flex-shrink:0">Revamp</span>`
+        : isSnipe
         ? `<span style="background:#EEF2FF;color:#5B6CF9;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.3px;flex-shrink:0">Snipe</span>`
         : `<span style="background:#F1F5F9;color:#94A3B8;font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;flex-shrink:0">Import</span>`;
       const titleText = item.title || (hasSnipe ? 'Generating…' : '—');
-      const contentCell = (hasSnipe || isSnipe)
+      const contentCell = (hasSnipe || isSnipe || isRevamp)
         ? `<div onclick="openSnipeDrawer('${item.id}')" style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:2px 0" onmouseover="this.style.opacity='.75'" onmouseout="this.style.opacity='1'">
             ${snipeBadge}
             <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#0F172A;font-size:13px;font-weight:500">${titleText}</span>
             <span style="color:#94A3B8;font-size:14px;flex-shrink:0">›</span>
            </div>`
         : `<span style="color:#CBD5E1">—</span>`;
-      // 4-segment progress bar
-      const segLabels = ['Brief','Draft','Meta','Publish'];
+      // 4-segment progress bar (Revamp uses Feedback/Draft/Meta/Publish)
+      const segLabels = isRevamp ? ['Feedback','Draft','Meta','Publish'] : ['Brief','Draft','Meta','Publish'];
       const segDone = [!!(item.snipe?.brief), !!(item.snipe?.draft), !!(item.snipe?.meta), published];
       const segsHtml = segLabels.map((lbl,i) => {
         const done = segDone[i];
@@ -5720,7 +5730,7 @@ function renderContentTable() {
       const reviewBtn = hasSnipe && !published
         ? `<button id="snipe-review-${item.id}" onclick="openSnipeDrawer('${item.id}')" style="margin-left:8px;background:#0F172A;color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap">Review</button>`
         : published ? `<span style="margin-left:8px;font-size:11px;font-weight:700;color:#10B981;background:#ECFDF5;padding:3px 10px;border-radius:20px">Published</span>` : '';
-      const progressCell = isSnipe
+      const progressCell = (isSnipe || isRevamp)
         ? `<div style="display:flex;align-items:center;gap:4px"><div id="snipe-prog-${item.id}" style="display:flex;gap:4px;align-items:center">${segsHtml}</div>${reviewBtn}</div>`
         : `<span style="color:#CBD5E1;font-size:13px">—</span>`;
       const costBadge = item.cost?.costAUD
@@ -6024,6 +6034,120 @@ function _populateSnipeOpportunities() {
   }).join('');
 }
 
+// ── Revamp Feature (IR-only by tenant config) ─────────────────
+function openRevampFromAction() {
+  document.getElementById('modal-content-action').style.display = 'none';
+  document.getElementById('revamp-url-input').value = '';
+  document.getElementById('revamp-competitor-input').value = '';
+  document.getElementById('revamp-type-select').value = 'bof';
+  document.getElementById('revamp-err').textContent = '';
+  document.querySelector('input[name="revamp-mode"][value="1"]').checked = true;
+  _revampModeChanged();
+  _revampTypeChanged();
+  document.getElementById('modal-revamp').style.display = 'flex';
+  setTimeout(() => document.getElementById('revamp-url-input').focus(), 80);
+}
+
+function closeRevampModal() {
+  document.getElementById('modal-revamp').style.display = 'none';
+}
+
+function _revampTypeChanged() {
+  const t = document.getElementById('revamp-type-select').value;
+  const row = document.getElementById('revamp-competitor-row');
+  if (row) row.style.display = (t === 'general') ? 'none' : '';
+}
+
+function _revampModeChanged() {
+  const m1 = document.getElementById('revamp-mode-1-label');
+  const m2 = document.getElementById('revamp-mode-2-label');
+  const checked = document.querySelector('input[name="revamp-mode"]:checked')?.value || '1';
+  if (checked === '1') {
+    m1.style.borderColor = '#10B981'; m1.style.background = '#ECFDF5';
+    m2.style.borderColor = '#E2E8F0'; m2.style.background = '#fff';
+  } else {
+    m2.style.borderColor = '#10B981'; m2.style.background = '#ECFDF5';
+    m1.style.borderColor = '#E2E8F0'; m1.style.background = '#fff';
+  }
+}
+
+async function revampGenerate() {
+  const url = document.getElementById('revamp-url-input').value.trim();
+  const articleType = document.getElementById('revamp-type-select').value;
+  const competitor = document.getElementById('revamp-competitor-input').value.trim();
+  const mode = parseInt(document.querySelector('input[name="revamp-mode"]:checked')?.value || '1');
+  const errEl = document.getElementById('revamp-err');
+  errEl.textContent = '';
+  if (!url || !/^https?:\/\//.test(url)) { errEl.textContent = 'Please enter a valid URL starting with https://'; return; }
+  if ((articleType === 'bof' || articleType === 'mof') && !competitor) { errEl.textContent = 'Competitor name is required for BOF and MOF articles.'; return; }
+
+  closeRevampModal();
+
+  // Create content item up-front so the row appears immediately
+  let itemId = '';
+  try {
+    const r = await fetch('/api/content-items', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ urls: [url], snipeType: 'revamp' }) });
+    if (r.ok) {
+      const items = await r.json();
+      const found = items.find(i => i.url === url);
+      if (found) itemId = found.id;
+    }
+  } catch(e) {}
+
+  _snipeDrawerItemId = itemId;
+  _snipeDrawerTab = 'draft';
+  await loadContentItems();
+
+  try {
+    const response = await fetch('/api/revamp/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, itemId, articleType, competitor, mode })
+    });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === 'stage') {
+            const stageMap = { feedback: 'brief', draft: 'draft', meta: 'meta' };
+            _updateSnipeRowProgress(itemId, stageMap[evt.stage] || evt.stage);
+          } else if (evt.type === 'complete') {
+            if (itemId) {
+              try {
+                await fetch(`/api/content-items/${itemId}`, {
+                  method:'PATCH',
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({
+                    snipeType: 'revamp',
+                    snipe: { brief: evt.feedback || '', draft: evt.draft || '', meta: evt.meta || '' },
+                    cost: { costAUD: evt.costAUD, model: evt.model }
+                  })
+                });
+              } catch(e) {}
+            }
+            _updateSnipeRowProgress(itemId, 'meta');
+            if (evt.costAUD) _showCostToast(evt.costAUD, evt.model);
+            await loadContentItems();
+          } else if (evt.type === 'error') {
+            console.error('Revamp error:', evt.error);
+          }
+        } catch(e2) {}
+      }
+    }
+  } catch(e) {
+    console.error('Revamp failed:', e.message);
+  }
+}
+
 function closeSnipeModal() {
   document.getElementById('modal-snipe').style.display = 'none';
 }
@@ -6096,6 +6220,9 @@ function openSnipeDrawer(itemId) {
   _snipeDrawerTab = 'draft';
   const drawer = document.getElementById('snipe-drawer');
   drawer.querySelector('#snipe-drawer-title').textContent = item.title || item.url;
+  // Retitle first drawer tab "Brief" → "Feedback" for revamp items
+  const briefTabBtn = document.getElementById('snipe-tab-brief');
+  if (briefTabBtn) briefTabBtn.textContent = item.snipeType === 'revamp' ? 'Feedback' : 'Brief';
   // Show cost if available
   const costEl = document.getElementById('snipe-drawer-cost');
   if (costEl) costEl.textContent = item.cost?.costAUD ? `$${item.cost.costAUD.toFixed(4)} AUD` : '';
@@ -6233,9 +6360,13 @@ function _mdToHtml(md) {
       <div style="width:36px;height:36px;border:1.5px solid #CBD5E1;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
       <div><div style="font-size:14px;font-weight:600;color:#0F172A">Optimize</div><div style="font-size:12px;color:#94A3B8;margin-top:2px">Optimize existing content for AI Search</div></div>
     </div>
-    <div onclick="openSnipeFromAction()" style="border:2px solid #5B6CF9;border-radius:10px;padding:16px 20px;margin-bottom:24px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:background .15s;background:#EEF2FF" onmouseover="this.style.background='#E0E7FF'" onmouseout="this.style.background='#EEF2FF'">
+    <div onclick="openSnipeFromAction()" style="border:2px solid #5B6CF9;border-radius:10px;padding:16px 20px;margin-bottom:10px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:background .15s;background:#EEF2FF" onmouseover="this.style.background='#E0E7FF'" onmouseout="this.style.background='#EEF2FF'">
       <div style="width:36px;height:36px;background:#5B6CF9;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>
       <div><div style="font-size:14px;font-weight:600;color:#3730A3">Snipe</div><div style="font-size:12px;color:#6366F1;margin-top:2px">Snipe highly-cited competitor content and outrank them</div></div>
+    </div>
+    <div id="content-action-revamp-tile" onclick="openRevampFromAction()" style="display:none;border:2px solid #10B981;border-radius:10px;padding:16px 20px;margin-bottom:24px;align-items:center;gap:14px;cursor:pointer;transition:background .15s;background:#ECFDF5" onmouseover="this.style.background='#D1FAE5'" onmouseout="this.style.background='#ECFDF5'">
+      <div style="width:36px;height:36px;background:#10B981;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 12a9 9 0 11-3.95-7.45"/><polyline points="21 4 21 10 15 10"/></svg></div>
+      <div><div style="font-size:14px;font-weight:600;color:#065F46">Revamp</div><div style="font-size:12px;color:#10B981;margin-top:2px">Revamp an existing article — review + restructure or polish</div></div>
     </div>
     <div style="text-align:center;font-size:10px;color:#CBD5E1;margin-bottom:14px;text-transform:uppercase;letter-spacing:.6px;font-weight:600">Import external</div>
     <div style="display:flex;gap:10px">
@@ -6307,6 +6438,66 @@ function _mdToHtml(md) {
         <button id="snipe-go-btn2" onclick="snipeGenerate()"
           style="flex:1;padding:10px 22px;background:#5B6CF9;border:none;border-radius:10px;font-size:13px;font-weight:700;color:#fff;cursor:pointer">Snipe →</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- REVAMP MODAL -->
+<div id="modal-revamp" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:210;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:16px;width:580px;max-width:94vw;max-height:88vh;overflow-y:auto;position:relative;display:flex;flex-direction:column">
+    <div style="padding:22px 24px 18px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;gap:12px;flex-shrink:0">
+      <div style="width:30px;height:30px;background:#10B981;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 12a9 9 0 11-3.95-7.45"/><polyline points="21 4 21 10 15 10"/></svg>
+      </div>
+      <div>
+        <div style="font-size:16px;font-weight:700;color:#0F172A">Revamp an Existing Article</div>
+        <div style="font-size:12px;color:#94A3B8;margin-top:1px">Phase 1-3 review + Mode 1/2 draft</div>
+      </div>
+      <button onclick="closeRevampModal()" style="margin-left:auto;background:none;border:none;font-size:22px;cursor:pointer;color:#94A3B8;line-height:1;padding:0">×</button>
+    </div>
+    <div style="padding:20px 24px">
+      <label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:7px">Article URL</label>
+      <input id="revamp-url-input" type="url" placeholder="https://intelligentresourcing.co/blogs/your-article"
+        style="width:100%;border:1.5px solid #E2E8F0;border-radius:10px;padding:11px 16px;font-size:13px;color:#0F172A;outline:none;font-family:inherit;box-sizing:border-box"
+        onfocus="this.style.borderColor='#10B981'" onblur="this.style.borderColor='#E2E8F0'">
+
+      <label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.4px;display:block;margin:16px 0 7px">Article Type</label>
+      <select id="revamp-type-select" style="width:100%;border:1.5px solid #E2E8F0;border-radius:10px;padding:11px 14px;font-size:13px;color:#0F172A;outline:none;font-family:inherit;box-sizing:border-box;background:#fff" onchange="_revampTypeChanged()">
+        <option value="bof">BOF — Best alternatives to [Competitor]</option>
+        <option value="mof">MOF — Intelligent Resourcing vs [Competitor]</option>
+        <option value="general">General — comparison / roundup</option>
+      </select>
+
+      <div id="revamp-competitor-row">
+        <label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.4px;display:block;margin:16px 0 7px">Competitor Name</label>
+        <input id="revamp-competitor-input" type="text" placeholder="e.g. Pearl Lemon, Cognism, HubSpot"
+          style="width:100%;border:1.5px solid #E2E8F0;border-radius:10px;padding:11px 16px;font-size:13px;color:#0F172A;outline:none;font-family:inherit;box-sizing:border-box"
+          onfocus="this.style.borderColor='#10B981'" onblur="this.style.borderColor='#E2E8F0'">
+      </div>
+
+      <label style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.4px;display:block;margin:16px 0 7px">Mode</label>
+      <div style="display:flex;gap:10px">
+        <label id="revamp-mode-1-label" style="flex:1;display:flex;flex-direction:column;gap:4px;padding:12px 14px;border:1.5px solid #10B981;border-radius:10px;cursor:pointer;background:#ECFDF5">
+          <span style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#065F46">
+            <input type="radio" name="revamp-mode" value="1" checked style="accent-color:#10B981" onchange="_revampModeChanged()">
+            Mode 1 — GEO Restructure
+          </span>
+          <span style="font-size:11px;color:#10B981">Full Answer-First Page Framework rewrite</span>
+        </label>
+        <label id="revamp-mode-2-label" style="flex:1;display:flex;flex-direction:column;gap:4px;padding:12px 14px;border:1.5px solid #E2E8F0;border-radius:10px;cursor:pointer">
+          <span style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#0F172A">
+            <input type="radio" name="revamp-mode" value="2" style="accent-color:#10B981" onchange="_revampModeChanged()">
+            Mode 2 — Best Practices
+          </span>
+          <span style="font-size:11px;color:#64748B">Fix errors + strengthen, keep existing structure</span>
+        </label>
+      </div>
+
+      <div id="revamp-err" style="color:#EF4444;font-size:12px;margin-top:12px;min-height:16px"></div>
+
+      <button id="revamp-go-btn" onclick="revampGenerate()"
+        style="width:100%;margin-top:14px;background:#10B981;color:#fff;border:none;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer">Revamp →</button>
+      <div style="font-size:11px;color:#94A3B8;margin-top:10px;text-align:center;line-height:1.5">Phase 2 verifies every cited URL in the article. Generation can take 2-4 minutes for long articles.</div>
     </div>
   </div>
 </div>

@@ -517,6 +517,7 @@ module.exports = {
   tenantStorage,
   forTenant,
   currentTenant,
+  currentClient,
   getClient,
   USE_SUPABASE,
   loadAllAeoResults,

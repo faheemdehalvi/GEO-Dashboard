@@ -35,7 +35,9 @@ const TENANT_DEFAULTS = {
     SEMRUSH_DOMAIN: 'kynection.com.au',
     SITEMAP_URLS: 'https://www.kynection.com.au/post-sitemap.xml,https://www.kynection.com.au/page-sitemap.xml',
     SNIPE_SKILL_FILE: 'snipe-skill.md',
+    REVAMP_SKILL_FILE: '',  // Revamp is IR-only for now
     ENABLED_SECTIONS: 'overview,web,gsc,semrush,youtube,mqls,deals,aeo,prompts,content',
+    CONTENT_FEATURES: 'snipe',  // available "+Content" actions
     DASHBOARD_TITLE: 'Kynection Analytics Dashboard'
   },
   ir: {
@@ -45,12 +47,14 @@ const TENANT_DEFAULTS = {
     SEMRUSH_DOMAIN: 'intelligentresourcing.co',
     SITEMAP_URLS: 'https://intelligentresourcing.co/sitemap.xml',
     SNIPE_SKILL_FILE: 'snipe-skill-ir.md',
+    REVAMP_SKILL_FILE: 'revamp-skill-ir.md',
     // IR omits semrush + mqls + deals + youtube (the IR YouTube brand
     // account isn't properly attached to anthony@intelligentresourcing.co
     // at the Google level — only at YouTube Studio Manager level — so
     // OAuth can't grant access. Re-enable `youtube` here once the brand
     // account ownership is sorted.
     ENABLED_SECTIONS: 'overview,web,gsc,aeo,prompts,content',
+    CONTENT_FEATURES: 'snipe,revamp',
     DASHBOARD_TITLE: 'Intelligent Resourcing Analytics'
   }
 };
@@ -93,6 +97,8 @@ function buildConfig(tenant) {
       urls: envOrDefault(tenant, 'SITEMAP_URLS').split(',').map(s => s.trim()).filter(Boolean)
     },
     snipeSkillFile:  envOrDefault(tenant, 'SNIPE_SKILL_FILE'),
+    revampSkillFile: envOrDefault(tenant, 'REVAMP_SKILL_FILE') || '',
+    contentFeatures: (envOrDefault(tenant, 'CONTENT_FEATURES') || 'snipe').split(',').map(s => s.trim()).filter(Boolean),
     enabledSections: envOrDefault(tenant, 'ENABLED_SECTIONS').split(',').map(s => s.trim()).filter(Boolean),
     title:           envOrDefault(tenant, 'DASHBOARD_TITLE'),
     supabaseUrl:     envFor(tenant, 'SUPABASE_URL'),

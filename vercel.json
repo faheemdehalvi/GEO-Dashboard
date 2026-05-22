@@ -5,7 +5,7 @@
       "src": "api/index.js",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": "{server.js,db.js,auth.js,snipe-skill.md}",
+        "includeFiles": "{server.js,db.js,auth.js,tenant.js,snipe-skill.md,snipe-skill-ir.md,revamp-skill-ir.md}",
         "maxDuration": 300
       }
     },

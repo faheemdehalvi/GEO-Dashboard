@@ -59,7 +59,8 @@ app.get('/api/auth/config', (req, res) => {
       slug: t,
       brand: cfg.brand,
       title: cfg.title,
-      enabledSections: cfg.enabledSections
+      enabledSections: cfg.enabledSections,
+      contentFeatures: cfg.contentFeatures || ['snipe']
     };
   });
   res.json({
@@ -641,15 +642,31 @@ async function refreshCompetitorsCache(tenant) {
   }
   try {
     await db.forTenant(tenant, async () => {
-      await db.seedCompetitorsIfEmpty(DEFAULT_COMPETITORS);
-      const rows = await db.listCompetitors({ activeOnly: false });
-      if (rows && rows.length) {
-        _competitorsByTenant[tenant] = rows;
-        const active = rows.filter(r => r.is_active);
-        _trackedByTenant[tenant]     = active.map(r => r.domain);
-        _compNamesByTenant[tenant]   = Object.fromEntries(active.map(r => [r.domain, r.display_name]));
-        console.log(`🏁 Competitors [${tenant}]: ${active.length} active (of ${rows.length})`);
+      // One-time cleanup: earlier builds seeded EVERY tenant with Kynection's
+      // 40 defaults. For non-KYN tenants, remove any rows that were inserted
+      // by that legacy seed (added_by='system-seed'). User-added competitors
+      // have a different added_by value and are preserved.
+      if (tenant !== 'kyn') {
+        try {
+          const client = db.currentClient();
+          if (!client) return;
+          const { error: delErr, count: delCount } = await client
+            .from('competitors').delete({ count: 'exact' }).eq('added_by', 'system-seed');
+          if (!delErr && delCount) console.log(`🧹 Competitors [${tenant}]: cleaned ${delCount} legacy seed rows`);
+        } catch (e) { /* table-missing or already clean — fine */ }
       }
+      // Only KYN gets the legacy hardcoded defaults seeded if empty.
+      // Other tenants start with a clean slate; the user adds competitors
+      // through the Competitors UI.
+      if (tenant === 'kyn') {
+        await db.seedCompetitorsIfEmpty(DEFAULT_COMPETITORS);
+      }
+      const rows = await db.listCompetitors({ activeOnly: false });
+      _competitorsByTenant[tenant] = rows || [];
+      const active = (rows || []).filter(r => r.is_active);
+      _trackedByTenant[tenant]   = active.map(r => r.domain);
+      _compNamesByTenant[tenant] = Object.fromEntries(active.map(r => [r.domain, r.display_name]));
+      console.log(`🏁 Competitors [${tenant}]: ${active.length} active (of ${(rows || []).length})`);
     });
   } catch (e) { console.warn(`competitors hydrate [${tenant}] failed:`, e.message); }
 }
@@ -2017,10 +2034,10 @@ function calcCostAUD(model, inputTokens, outputTokens) {
 
 // ── Snipe AI helper — Claude if key set, else OpenAI, with timeout ─
 // Returns { text, model, inputTokens, outputTokens }
-async function callSnipeAI({ system, user, maxTokens = 600, fast = false }) {
+async function callSnipeAI({ system, user, maxTokens = 600, fast = false, timeoutMs: timeoutOverride }) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || CONFIG.anthropic?.apiKey;
   const OPENAI_KEY    = process.env.OPENAI_API_KEY    || CONFIG.openai?.apiKey;
-  const timeoutMs     = fast ? 20000 : 240000; // 4 min for full brief/draft/meta — Claude Sonnet 4.5 generating 12K tokens of structured content can take 100-180s on long competitor pages, especially over Vercel's iad1 egress to Anthropic.
+  const timeoutMs     = timeoutOverride || (fast ? 20000 : 240000); // 4 min for full brief/draft/meta. Override to leave headroom under Vercel's 300s function cap when other steps (link prefilter, Phase 2 verify, post-audit) eat into the budget.
 
   const withTimeout = (fetchPromise) => {
     const ctrl = new AbortController();
@@ -2226,6 +2243,463 @@ Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or aft
   }
 });
 
+// ============================================================
+// Revamp — Phase 1-3 review + Mode 1/Mode 2 draft for an existing article
+// (IR-only by tenant config, but the route is registered globally and
+//  gated by req.config.revampSkillFile + contentFeatures.includes('revamp'))
+// ============================================================
+
+// Richer scrape than scrapePageContent — preserves up to 30K chars of body
+// text AND extracts every external <a href> with anchor text + a short
+// context window. Used by Revamp for Phase 2 citation verification.
+async function scrapePageWithLinks(url) {
+  const empty = { title: '', h1: '', metaDesc: '', text: '', html: '', externalLinks: [] };
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => { if (!done) { done = true; resolve(val); } };
+    const hardTimer = setTimeout(() => finish(empty), 12000);
+    try {
+      let cleanUrl = url, articleHost = '';
+      try { const u = new URL(url); u.hash = ''; cleanUrl = u.toString(); articleHost = u.hostname.replace(/^www\./, ''); } catch(e) {}
+      const mod = cleanUrl.startsWith('https') ? require('https') : require('http');
+      const req = mod.get(cleanUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }, timeout: 10000 }, (r) => {
+        let data = '';
+        r.on('data', c => { data += c; if (data.length > 600000) req.destroy(); });
+        r.on('end', () => {
+          clearTimeout(hardTimer);
+          const titleMatch = data.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
+          const title = titleMatch ? titleMatch[1].trim().replace(/&amp;/g,'&').replace(/&#39;/g,"'").replace(/&quot;/g,'"') : '';
+          const h1Match = data.match(/<h1[^>]*>([\s\S]{1,500}?)<\/h1>/i);
+          const h1 = h1Match ? h1Match[1].replace(/<[^>]+>/g,'').trim() : '';
+          const metaMatch = data.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']{1,500})["']/i)
+                         || data.match(/<meta[^>]+content=["']([^"']{1,500})["'][^>]+name=["']description["']/i);
+          const metaDesc = metaMatch ? metaMatch[1].trim() : '';
+          // Strip scripts/styles but keep anchor structure for link extraction
+          const clean = data.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<nav[\s\S]*?<\/nav>/gi,'').replace(/<footer[\s\S]*?<\/footer>/gi,'').replace(/<header[\s\S]*?<\/header>/gi,'');
+          // Extract every <a href> with anchor text
+          const links = [];
+          const seen = new Set();
+          const aRe = /<a\s+[^>]*href=["']([^"'#][^"']*)["'][^>]*>([\s\S]{1,300}?)<\/a>/gi;
+          let m;
+          while ((m = aRe.exec(clean)) !== null) {
+            let href = m[1].trim();
+            // Resolve relative URLs
+            try { href = new URL(href, cleanUrl).toString(); } catch(e) { continue; }
+            const anchor = m[2].replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+            if (!anchor || anchor.length < 2) continue;
+            let host = '';
+            try { host = new URL(href).hostname.replace(/^www\./, ''); } catch(e) { continue; }
+            if (host === articleHost) continue; // internal link, skip
+            // Skip common navigation/social/asset links
+            if (/(twitter\.com\/intent|facebook\.com\/sharer|linkedin\.com\/share|mailto:|tel:|\.(jpg|png|svg|gif|webp|css|js)$)/i.test(href)) continue;
+            const key = host + '|' + href.split('?')[0].split('#')[0];
+            if (seen.has(key)) continue;
+            seen.add(key);
+            // Capture ~120 chars of context around the link
+            const idx = m.index;
+            const before = clean.slice(Math.max(0, idx - 120), idx).replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(-120);
+            const after  = clean.slice(idx + m[0].length, idx + m[0].length + 120).replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0, 120);
+            links.push({ url: href, anchor, context: `${before} [LINK: ${anchor}] ${after}`.trim().slice(0, 280) });
+          }
+          const text = clean.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 30000);
+          finish({ title, h1, metaDesc, text, html: '', externalLinks: links });
+        });
+      });
+      req.on('error', () => { clearTimeout(hardTimer); finish(empty); });
+      req.on('timeout', () => { req.destroy(); });
+    } catch(e) { clearTimeout(hardTimer); finish(empty); }
+  });
+}
+
+// Fetch a single external URL and return verification metadata:
+//   { url, status: 'live' | 'http_error' | 'timeout' | 'error', httpStatus, title, snippet }
+// 8-second hard timeout; truncates body to 8KB so verification stays fast.
+async function verifyExternalLink(linkUrl) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => { if (!done) { done = true; resolve(val); } };
+    const timer = setTimeout(() => finish({ url: linkUrl, status: 'timeout' }), 8000);
+    try {
+      const mod = linkUrl.startsWith('https') ? require('https') : require('http');
+      const req = mod.get(linkUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }, timeout: 6000 }, (r) => {
+        // Follow one redirect
+        if ([301, 302, 307, 308].includes(r.statusCode) && r.headers.location) {
+          clearTimeout(timer);
+          let next = r.headers.location;
+          try { next = new URL(next, linkUrl).toString(); } catch(e) {}
+          r.destroy();
+          return verifyExternalLink(next).then(v => resolve({ ...v, originalUrl: linkUrl }));
+        }
+        if (r.statusCode >= 400) {
+          clearTimeout(timer);
+          r.destroy();
+          return finish({ url: linkUrl, status: 'http_error', httpStatus: r.statusCode });
+        }
+        let data = '';
+        r.on('data', c => { data += c; if (data.length > 8192) req.destroy(); });
+        r.on('end', () => {
+          clearTimeout(timer);
+          const titleMatch = data.match(/<title[^>]*>([^<]{1,300})<\/title>/i);
+          const title = titleMatch ? titleMatch[1].trim() : '';
+          const snippet = data.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s{2,}/g,' ').trim().slice(0, 600);
+          finish({ url: linkUrl, status: 'live', httpStatus: r.statusCode, title, snippet });
+        });
+      });
+      req.on('error', () => { clearTimeout(timer); finish({ url: linkUrl, status: 'error' }); });
+      req.on('timeout', () => { req.destroy(); });
+    } catch(e) { clearTimeout(timer); finish({ url: linkUrl, status: 'error' }); }
+  });
+}
+
+// Run a list of verifyExternalLink calls with a concurrency cap.
+async function verifyAllLinks(links, concurrency = 5) {
+  const results = new Array(links.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, links.length) }, async () => {
+    while (cursor < links.length) {
+      const i = cursor++;
+      const v = await verifyExternalLink(links[i].url);
+      results[i] = { ...links[i], verification: v };
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// Lightweight HEAD-check for a single URL — used to pre-filter the sitemap
+// so we never hand a 404'd internal URL to the AI.
+async function quickHeadCheck(urlStr, timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const t = setTimeout(() => finish(false), timeoutMs);
+    try {
+      const mod = urlStr.startsWith('https') ? require('https') : require('http');
+      const u = new URL(urlStr);
+      const req = mod.request({
+        method: 'HEAD',
+        host: u.hostname,
+        port: u.port || (urlStr.startsWith('https') ? 443 : 80),
+        path: u.pathname + (u.search || ''),
+        headers: { 'User-Agent': 'Mozilla/5.0 (revamp-linkcheck)' },
+        timeout: timeoutMs - 500
+      }, (r) => {
+        clearTimeout(t);
+        // Follow one redirect manually
+        if ([301, 302, 307, 308].includes(r.statusCode) && r.headers.location) {
+          let next = r.headers.location;
+          try { next = new URL(next, urlStr).toString(); } catch(e) {}
+          r.destroy();
+          return quickHeadCheck(next, Math.max(1000, timeoutMs - 1000)).then(finish);
+        }
+        finish(r.statusCode >= 200 && r.statusCode < 400);
+        r.destroy();
+      });
+      req.on('error', () => { clearTimeout(t); finish(false); });
+      req.on('timeout', () => { req.destroy(); });
+      req.end();
+    } catch (e) { clearTimeout(t); finish(false); }
+  });
+}
+
+// Prefilter a sitemap URL list with HEAD checks. Returns only URLs that
+// return 2xx/3xx. Caps the input to keep wall-clock under control.
+async function prefilterSitemap(urls, { cap = 60, concurrency = 12, timeoutMs = 4000 } = {}) {
+  const slice = urls.slice(0, cap);
+  const live = [];
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, slice.length) }, async () => {
+    while (cursor < slice.length) {
+      const i = cursor++;
+      const ok = await quickHeadCheck(slice[i], timeoutMs);
+      if (ok) live.push(slice[i]);
+    }
+  });
+  await Promise.all(workers);
+  return live;
+}
+
+// Extract every Markdown hyperlink from the generated draft.
+// Returns: [{ anchor, url, internal }]
+function extractMarkdownLinks(md, internalDomain) {
+  if (!md) return [];
+  const out = [];
+  const re = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let m;
+  while ((m = re.exec(md)) !== null) {
+    let host = '';
+    try { host = new URL(m[2]).hostname.replace(/^www\./, ''); } catch(e) { continue; }
+    out.push({ anchor: m[1], url: m[2], internal: host === internalDomain });
+  }
+  return out;
+}
+
+// Normalise a URL for sitemap comparison (strip trailing slash + scheme + www).
+function normaliseForSitemap(u) {
+  try {
+    const x = new URL(u);
+    return (x.hostname.replace(/^www\./,'') + x.pathname).replace(/\/$/, '').toLowerCase();
+  } catch(e) { return u.toLowerCase(); }
+}
+
+// POST /api/revamp/generate
+// Body: { url, articleType: 'bof'|'mof'|'general', competitor, mode: 1|2, itemId? }
+// SSE stream: 'progress' events + 'complete' with { feedback, draft, meta }
+app.post('/api/revamp/generate', async (req, res) => {
+  const { url, articleType = 'general', competitor = '', mode = 1, itemId } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'url required' });
+  if (!req.config.revampSkillFile) return res.status(400).json({ error: 'Revamp is not enabled for this tenant' });
+  if (!(req.config.contentFeatures || []).includes('revamp')) return res.status(400).json({ error: 'Revamp is not enabled for this tenant' });
+
+  const brand = req.config.brand;
+  const skillFile = path.join(__dirname, req.config.revampSkillFile);
+  const sitemapUrls = req.config.sitemap.urls;
+  const modeNum = parseInt(mode) === 2 ? 2 : 1;
+  const typeLabel = articleType === 'bof' ? 'BOF (Best alternatives to ' + (competitor || 'competitor') + ')'
+                  : articleType === 'mof' ? 'MOF (' + brand.name + ' vs ' + (competitor || 'competitor') + ')'
+                  : 'General comparison / roundup';
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  const send = (d) => { res.write(`data: ${JSON.stringify(d)}\n\n`); };
+
+  let skillPrompt = '';
+  try { skillPrompt = fs.readFileSync(skillFile, 'utf8'); }
+  catch(e) { send({ type: 'error', error: 'Could not load revamp skill file: ' + e.message }); return res.end(); }
+
+  send({ type: 'progress', stage: 'scraping', message: 'Fetching the article...' });
+  const page = await scrapePageWithLinks(url);
+  if (!page.text || page.text.length < 300) {
+    send({ type: 'error', error: 'Could not scrape article body — page may be JS-rendered or blocked.' });
+    return res.end();
+  }
+
+  send({ type: 'progress', stage: 'sitemap', message: 'Fetching sitemap...' });
+  const sitemapResults = await Promise.all(sitemapUrls.map(u => fetchSitemapUrls(u)));
+  const rawSitemapUrls = sitemapResults.flat();
+
+  // Pre-flight: HEAD-check sitemap URLs so the AI never sees a 404'd
+  // internal link. Caps at 50 URLs / concurrency 15 / 3.5s timeout
+  // = ~14s wall-clock worst case (fits Vercel's 300s budget).
+  send({ type: 'progress', stage: 'sitemap', message: `Validating ${Math.min(50, rawSitemapUrls.length)} sitemap URLs...` });
+  const allInternalUrls = await prefilterSitemap(rawSitemapUrls, { cap: 50, concurrency: 15, timeoutMs: 3500 });
+  const droppedSitemap = Math.min(50, rawSitemapUrls.length) - allInternalUrls.length;
+
+  // Cap at 10 links so Phase 2 verification fits within Vercel's 300s budget
+  // (scrape 12s + sitemap 10s + prefilter 14s + verify 10 links @ 5 ≈ 12s
+  //  + external search 10s + AI 220s + post-audit 4s ≈ 282s)
+  const linksToVerify = page.externalLinks.slice(0, 10);
+  const skipped = page.externalLinks.length - linksToVerify.length;
+  send({ type: 'progress', stage: 'verifying', message: `Verifying ${linksToVerify.length} external citations${skipped ? ` (${skipped} more not verified — article had ${page.externalLinks.length} links)` : ''}...`, totalLinks: linksToVerify.length });
+  const verifiedLinks = await verifyAllLinks(linksToVerify, 5);
+
+  // Build citation verification table for the AI prompt
+  const verificationRows = verifiedLinks.map(v => {
+    const status = v.verification?.status || 'unknown';
+    const httpCode = v.verification?.httpStatus ? ` (HTTP ${v.verification.httpStatus})` : '';
+    const sourceTitle = v.verification?.title || '';
+    return `| ${v.anchor} | ${v.url} | ${sourceTitle} | ${status}${httpCode} | ${v.context.slice(0, 200)} |`;
+  }).join('\n');
+
+  const liveLinks = verifiedLinks.filter(v => v.verification?.status === 'live').length;
+  const deadLinks = verifiedLinks.length - liveLinks;
+
+  send({ type: 'progress', stage: 'searching', message: 'Finding fresh authoritative source candidates...' });
+  // Topic for external source search = article title or H1
+  const topic = page.h1 || page.title || competitor || 'B2B revenue operations';
+  const externalCandidates = await searchExternalSourcesForSnipe(topic, brand.domain).catch(() => []);
+
+  send({ type: 'progress', stage: 'generating', message: 'Reviewing + revising article (this can take 2-4 minutes)...' });
+
+  // Build the user prompt with all gathered data
+  const internalLinksBlock = allInternalUrls.length
+    ? allInternalUrls.slice(0, 80).map(u => `- ${u}`).join('\n')
+    : `- https://${brand.domain}/`;
+
+  const externalCandidatesBlock = externalCandidates.length
+    ? externalCandidates.slice(0, 12).map(s => `- [${s.title}](${s.url}) — ${s.snippet ? s.snippet.slice(0, 150) : ''}`).join('\n')
+    : '(Use your knowledge to suggest authoritative sources: HubSpot, Salesforce, LinkedIn B2B Institute, Gong, Drift, 6sense, Salesloft, Outreach, Pipedrive, Demand Gen Report, HBR. Max 1 from McKinsey/Forrester/Gartner combined. No G2 links.)';
+
+  const userPrompt = `You are revamping this existing ${brand.name} article.
+
+**Article URL:** ${url}
+**Article Type:** ${typeLabel}
+**Competitor:** ${competitor || 'N/A (general comparison)'}
+**Selected Mode:** ${modeNum === 1 ? 'Mode 1 — Full GEO Restructure' : 'Mode 2 — Best Practices Update (preserve existing structure)'}
+
+**Current H1:** ${page.h1 || page.title || '(none detected)'}
+**Current Meta Description:** ${page.metaDesc || '(none detected)'}
+
+**Current Article Body (scraped, ${page.text.length} chars):**
+${page.text}
+
+---
+
+## Phase 2 — Citation Verification Table
+
+${verifiedLinks.length} external links were extracted from the article. ${liveLinks} verified live, ${deadLinks} unverified/dead. Each row was HTTP-fetched.
+
+| Anchor Text | URL | Source Page Title | Status | Context in Article |
+|---|---|---|---|---|
+${verificationRows || '| (no external links found in article) | | | | |'}
+
+**Action rule:** Sources with status \`http_error\`, \`timeout\`, or \`error\` are UNVERIFIED and MUST be dropped from the revised draft. Cite confirmed sources only, or replace with fresh sources from the candidate list below.
+
+---
+
+## ${brand.name} Sitemap (use ONLY these URLs for internal links — never invent slugs)
+
+${internalLinksBlock}
+
+---
+
+## Authoritative External Source Candidates (use to replace dropped Unverified citations)
+
+${externalCandidatesBlock}
+
+---
+
+## Required Output
+
+Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
+
+- **feedback**: full Phase 1-3 review following the FEEDBACK section template in your system prompt. Include the citation verification table verbatim.
+- **draft**: revised article. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure)'} per your system prompt's mandatory checks.
+- **meta**: meta description (≤160 chars, CTR-optimised) + internal links used + external citations used + any Unverified sources dropped.
+
+CRITICAL:
+1. Sources with status not equal to \`live\` are DROPPED from the draft.
+2. Internal links come ONLY from the sitemap list above.
+3. ${brand.name} listed first in any comparison table, with "Revenue Operations Studio" structural label.
+4. No em-dashes / hedging / no-fly vocabulary / G2 links / ™ symbols anywhere.
+5. Mode ${modeNum} mandatory checks from your system prompt apply.`;
+
+  const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
+  let aiResult;
+  try {
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 16000, timeoutMs: 220000 });
+  } catch(e) {
+    clearInterval(heartbeat);
+    send({ type: 'error', error: 'AI call failed: ' + e.message });
+    return res.end();
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  const jsonMatch = aiResult.text.match(/\{[\s\S]*\}/);
+  let result = { feedback: '', draft: '', meta: '' };
+  if (jsonMatch) {
+    try { result = JSON.parse(jsonMatch[0]); }
+    catch(e) { result.feedback = aiResult.text; }
+  }
+
+  // ── Post-generation link audit ────────────────────────────────
+  // Extract every Markdown link in the produced draft and validate them.
+  // Internal links must appear in the (already-prefiltered) sitemap.
+  // External links are checked for liveness with the same quickHeadCheck.
+  // Audit table is appended to feedback so the user can see exactly what
+  // the AI produced.
+  const internalDomain = brand.domain.replace(/^www\./,'').toLowerCase();
+  const sitemapSet = new Set(allInternalUrls.map(normaliseForSitemap));
+  const draftLinks = extractMarkdownLinks(result.draft || '', internalDomain);
+  const internalLinks = draftLinks.filter(l => l.internal);
+  const externalLinks = draftLinks.filter(l => !l.internal);
+
+  // Internal: check vs sitemap (cheap, no HTTP)
+  const internalAudit = internalLinks.map(l => ({
+    ...l,
+    ok: sitemapSet.has(normaliseForSitemap(l.url)),
+    note: sitemapSet.has(normaliseForSitemap(l.url)) ? 'in sitemap' : 'NOT in verified sitemap'
+  }));
+
+  // External: HEAD-check each in parallel (cap 8 for time budget)
+  send({ type: 'progress', stage: 'auditing', message: `Auditing ${internalLinks.length} internal + ${externalLinks.length} external links in the draft...` });
+  const extToCheck = externalLinks.slice(0, 8);
+  const extResults = await Promise.all(extToCheck.map(async (l) => {
+    const ok = await quickHeadCheck(l.url, 3500);
+    return { ...l, ok, note: ok ? 'live' : 'DEAD / blocked' };
+  }));
+  const externalAudit = [
+    ...extResults,
+    ...externalLinks.slice(8).map(l => ({ ...l, ok: null, note: 'not audited (over cap)' }))
+  ];
+
+  const minInternal = 3, minExternal = 5;
+  const internalLiveCount = internalAudit.filter(l => l.ok).length;
+  const externalLiveCount = externalAudit.filter(l => l.ok).length;
+  const internalDeadCount = internalAudit.length - internalLiveCount;
+  const externalDeadCount = externalAudit.filter(l => l.ok === false).length;
+
+  const auditLines = [];
+  auditLines.push('');
+  auditLines.push('---');
+  auditLines.push('');
+  auditLines.push('## Link Audit (auto-generated, post-AI)');
+  auditLines.push('');
+  auditLines.push(`**Internal:** ${internalLiveCount} verified / ${internalAudit.length} total (minimum ${minInternal}). ${internalDeadCount ? `**${internalDeadCount} not in sitemap — replace these.**` : '✓'}`);
+  auditLines.push(`**External:** ${externalLiveCount} verified live / ${externalAudit.length} total (minimum ${minExternal}). ${externalDeadCount ? `**${externalDeadCount} dead — replace these.**` : '✓'}`);
+  if (internalLiveCount < minInternal) auditLines.push(`> **Below internal-link minimum (${minInternal}).** Add ${minInternal - internalLiveCount} more from the sitemap.`);
+  if (externalLiveCount < minExternal) auditLines.push(`> **Below external-citation minimum (${minExternal}).** Add ${minExternal - externalLiveCount} more authoritative sources.`);
+  auditLines.push('');
+  if (internalAudit.length) {
+    auditLines.push('### Internal Links in Draft');
+    auditLines.push('| Anchor | URL | Status |');
+    auditLines.push('|---|---|---|');
+    internalAudit.forEach(l => auditLines.push(`| ${l.anchor.slice(0,60)} | ${l.url} | ${l.ok ? '✅ ' + l.note : '❌ ' + l.note} |`));
+    auditLines.push('');
+  }
+  if (externalAudit.length) {
+    auditLines.push('### External Links in Draft');
+    auditLines.push('| Anchor | URL | Status |');
+    auditLines.push('|---|---|---|');
+    externalAudit.forEach(l => auditLines.push(`| ${l.anchor.slice(0,60)} | ${l.url} | ${l.ok === true ? '✅ ' + l.note : l.ok === false ? '❌ ' + l.note : '⚠ ' + l.note} |`));
+    auditLines.push('');
+  }
+  result.feedback = (result.feedback || '') + auditLines.join('\n');
+
+  const costAUD = calcCostAUD(aiResult.model, aiResult.inputTokens, aiResult.outputTokens);
+  const costStr = `$${costAUD.toFixed(4)} AUD`;
+  const costMeta = { model: aiResult.model, inputTokens: aiResult.inputTokens, outputTokens: aiResult.outputTokens, costAUD: parseFloat(costAUD.toFixed(4)) };
+
+  // Save: store revamp output in the existing snipe JSONB column so the
+  // drawer continues to work. snipeType='revamp' tells the UI to label
+  // the first tab "Feedback" instead of "Brief".
+  if (itemId) {
+    try {
+      const existing = await db.getContentItem(itemId);
+      if (existing) {
+        await db.updateContentItem(itemId, {
+          snipeType: 'revamp',
+          snipe: {
+            brief: result.feedback,
+            draft: result.draft,
+            meta: result.meta,
+            generatedAt: new Date().toISOString(),
+            sniped: url,
+            mode: modeNum,
+            articleType,
+            competitor
+          },
+          title: existing.title || page.h1 || page.title || url,
+          cost: costMeta
+        });
+      }
+    } catch(e) { console.error('revamp save:', e.message); }
+  }
+
+  send({ type: 'stage', stage: 'feedback' });
+  await new Promise(r => setTimeout(r, 300));
+  send({ type: 'stage', stage: 'draft' });
+  await new Promise(r => setTimeout(r, 300));
+  send({ type: 'stage', stage: 'meta' });
+  await new Promise(r => setTimeout(r, 200));
+  send({ type: 'complete', feedback: result.feedback, draft: result.draft, meta: result.meta, costAUD: parseFloat(costAUD.toFixed(4)), costStr, model: aiResult.model, verifiedLive: liveLinks, verifiedDead: deadLinks });
+  res.end();
+});
+
 // PATCH /api/content-items/:id — update a content item
 app.patch('/api/content-items/:id', async (req, res) => {
   try {
@@ -2398,7 +2872,7 @@ if (require.main === module) {
   const PORT = process.env.PORT || 4016;
   app.listen(PORT, async () => {
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  🚀  Kynection Dashboard  |  v3.0');
+    console.log('  🚀  GEO Dashboard  |  v3.1  |  tenants: ' + KNOWN_TENANTS.join(', '));
     console.log(`  📡  http://localhost:${PORT}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
     const { exec } = require('child_process');
