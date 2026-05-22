@@ -46,6 +46,9 @@ const PUBLIC_API_SUBPATHS = new Set([
 ]);
 app.use('/api', (req, res, next) => {
   if (PUBLIC_API_SUBPATHS.has(req.path)) return next();
+  // /api/_diag/* — read-only diagnostics, no secrets. Public so we can
+  // verify tenant DB routing without logging in.
+  if (req.path.startsWith('/_diag/')) return next();
   return requireAuth(req, res, next);
 });
 
