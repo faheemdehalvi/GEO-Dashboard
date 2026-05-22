@@ -1376,11 +1376,25 @@ window.fetch = async function(input, init) {
     init.headers = headers;
   }
   const res = await _originalFetch(input, init);
-  if (isApi && !isPublic && res.status === 401 && _sb) {
-    // Session expired or invalid — force re-login
-    await _sb.auth.signOut();
-    _sbSession = null;
-    document.getElementById('auth-overlay').style.display = 'flex';
+  if (isApi && !isPublic && _sb) {
+    if (res.status === 401) {
+      // Session expired or invalid — force re-login
+      await _sb.auth.signOut();
+      _sbSession = null;
+      document.getElementById('auth-overlay').style.display = 'flex';
+    } else if (res.status === 403) {
+      // Authenticated but not authorized (e.g. email domain not whitelisted)
+      let msg = 'Access denied — your account is not permitted to use this dashboard.';
+      try {
+        const cloned = res.clone();
+        const body = await cloned.json();
+        if (body?.message) msg = body.message;
+      } catch(_) {}
+      await _sb.auth.signOut();
+      _sbSession = null;
+      document.getElementById('auth-overlay').style.display = 'flex';
+      showAuthError(msg);
+    }
   }
   return res;
 };
