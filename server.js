@@ -167,6 +167,30 @@ const getYTToken = (req) => {
 // Helpers
 // ============================================================
 app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString(), cwd: process.cwd(), version: 'v3-fixed-attribution' }));
+
+// Public diagnostic — no secrets, just confirms which tenant has a Supabase
+// client configured and which Supabase project it points to (host only).
+// Use to debug "wrong tenant's data on the wrong dashboard" issues.
+app.get('/api/_diag/db', (req, res) => {
+  const out = {};
+  for (const t of KNOWN_TENANTS) {
+    const client = db.getClient(t);
+    let urlHost = null;
+    try {
+      // Inspect resolved env var without leaking the key
+      const prefix = t.toUpperCase() + '_';
+      const url = process.env[prefix + 'SUPABASE_URL'] || (t === 'kyn' ? process.env.SUPABASE_URL : null);
+      if (url) urlHost = new URL(url).hostname;
+    } catch(e) {}
+    out[t] = {
+      hasClient: !!client,
+      supabaseHost: urlHost,
+      urlEnvSet: !!process.env[t.toUpperCase() + '_SUPABASE_URL'],
+      keyEnvSet: !!process.env[t.toUpperCase() + '_SUPABASE_SERVICE_ROLE_KEY']
+    };
+  }
+  res.json({ tenants: out, processCwd: process.cwd(), nodeVersion: process.version });
+});
 app.get('/api/config', (req, res) => res.json({
   tenant: req.tenant,
   brand: req.config.brand,
