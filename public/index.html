@@ -5412,14 +5412,31 @@ function _brandDomain() {
   } catch(e) {}
 })();
 
-// Get all prompts: base CSV + custom from localStorage.
-// The hardcoded AEO_PROMPTS (237 prompts) is Kynection-specific so it
-// only loads for the kyn tenant. Other tenants start with their own
-// custom list — paste CSV via the Add Prompts modal to populate.
+// Get all prompts: base CSV + custom from localStorage + anything in
+// _aeoResults (which is hydrated from Supabase, so prompts that have
+// been streamed at least once are shared across browsers/devices).
+// The hardcoded AEO_PROMPTS (237) is Kynection-specific so it only
+// loads for the kyn tenant.
 function getAllPrompts() {
   const custom = JSON.parse(localStorage.getItem(_customPromptsKey()) || '[]');
   const base = (_tenant === 'kyn') ? AEO_PROMPTS : [];
-  return [...base, ...custom];
+  // Pull persisted prompts from _aeoResults (Supabase). Each entry there
+  // has {prompt, topic, tag, runs}. Dedupe by exact prompt text so we
+  // don't double-list anything already in base or custom.
+  const seen = new Set([...base, ...custom].map(p => (p.text || '').toLowerCase().trim()));
+  const fromDb = [];
+  try {
+    if (window._aeoResults && typeof _aeoResults === 'object') {
+      for (const [id, entry] of Object.entries(_aeoResults)) {
+        const text = (entry?.prompt || '').trim();
+        if (!text) continue;
+        if (seen.has(text.toLowerCase())) continue;
+        seen.add(text.toLowerCase());
+        fromDb.push({ id, text, topic: entry.topic || 'General', tag: entry.tag || 'Non-Branded' });
+      }
+    }
+  } catch(e) {}
+  return [...base, ...custom, ...fromDb];
 }
 
 // Get all unique topics (base + custom)
