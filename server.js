@@ -138,16 +138,42 @@ async function getToken(key, clientId, clientSecret, refreshToken) {
   _tokens[key] = { token: d.access_token, expiry: Date.now() + (d.expires_in - 120) * 1000 };
   return d.access_token;
 }
-const getGoogleToken = () => getToken('google', CONFIG.google.clientId, CONFIG.google.clientSecret, getRefreshToken());
-// YouTube uses its own OAuth client + refresh token (separate from GA4/GSC
-// because the channel-manager account differs and we own the client here)
-const getYTToken = () => getToken('youtube', CONFIG.youtube.clientId, CONFIG.youtube.clientSecret, getYTRefreshToken());
+
+// Tenant-aware token getters. Cache key includes the tenant slug so KYN and
+// IR don't trample each other's cached access tokens. Refresh tokens come
+// from req.config.{google,youtube}.refreshToken (resolved per-tenant by the
+// tenant middleware). Local fallback: if req isn't available (startup code),
+// read from the global CONFIG (Kynection-era behaviour).
+function tenantOf(req) { return req?.tenant || 'kyn'; }
+function googleCreds(req) {
+  if (req?.config?.google) return req.config.google;
+  return { clientId: CONFIG.google.clientId, clientSecret: CONFIG.google.clientSecret, refreshToken: getRefreshToken() };
+}
+function youtubeCreds(req) {
+  if (req?.config?.youtube) return req.config.youtube;
+  return { clientId: CONFIG.youtube.clientId, clientSecret: CONFIG.youtube.clientSecret, refreshToken: getYTRefreshToken() };
+}
+const getGoogleToken = (req) => {
+  const c = googleCreds(req);
+  return getToken('google:' + tenantOf(req), c.clientId, c.clientSecret, c.refreshToken);
+};
+const getYTToken = (req) => {
+  const c = youtubeCreds(req);
+  return getToken('youtube:' + tenantOf(req), c.clientId, c.clientSecret, c.refreshToken);
+};
 
 // ============================================================
 // Helpers
 // ============================================================
 app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString(), cwd: process.cwd(), version: 'v3-fixed-attribution' }));
-app.get('/api/config', (req, res) => res.json({ gscSiteUrl: CONFIG.gsc.siteUrl, ga4PropertyId: CONFIG.ga4.propertyId, semrushDomain: CONFIG.semrush.domain }));
+app.get('/api/config', (req, res) => res.json({
+  tenant: req.tenant,
+  brand: req.config.brand,
+  gscSiteUrl:    req.config.gsc.siteUrl,
+  ga4PropertyId: req.config.ga4.propertyId,
+  semrushDomain: req.config.semrush.domain,
+  enabledSections: req.config.enabledSections
+}));
 
 app.get('/api/test/gemini', async (req, res) => {
   const key = process.env.GEMINI_API_KEY || CONFIG.gemini.apiKey;
@@ -213,9 +239,9 @@ async function gscQuery(token, site, body) {
   return r.json();
 }
 
-async function ga4Report(token, body) {
+async function ga4Report(req, token, body) {
   const r = await fetch(
-    `https://analyticsdata.googleapis.com/v1beta/properties/${CONFIG.ga4.propertyId}:runReport`,
+    `https://analyticsdata.googleapis.com/v1beta/properties/${req.config.ga4.propertyId}:runReport`,
     { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
   );
   return r.json();
@@ -236,16 +262,29 @@ function parseSemrushCSV(text) {
 // ============================================================
 // GSC routes
 // ============================================================
+// Middleware that ensures req.config.gsc.siteUrl is populated for any
+// /api/gsc/* request. Registered BEFORE the routes so it actually fires
+// (Express dispatches in registration order). Implementation of
+// detectGSCSite is hoisted below; closures evaluate at request time.
+app.use('/api/gsc', async (req, res, next) => {
+  try {
+    if (!req.config.gsc.siteUrl) {
+      req.config.gsc.siteUrl = await detectGSCSite(req.tenant);
+    }
+  } catch (e) { /* leave siteUrl null — routes will surface their own error */ }
+  next();
+});
+
 app.get('/api/gsc/sites', async (req, res) => {
-  try { const t = await getGoogleToken(); const r = await fetch('https://www.googleapis.com/webmasters/v3/sites', { headers: { Authorization: `Bearer ${t}` } }); res.json(await r.json()); }
+  try { const t = await getGoogleToken(req); const r = await fetch('https://www.googleapis.com/webmasters/v3/sites', { headers: { Authorization: `Bearer ${t}` } }); res.json(await r.json()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/gsc/overview', async (req, res) => {
   try {
-    const t = await getGoogleToken();
+    const t = await getGoogleToken(req);
     const { start, end, prevStart, prevEnd } = parseDateRangeGSC(req.query);
-    const site = req.query.site || CONFIG.gsc.siteUrl;
+    const site = req.query.site || req.config.gsc.siteUrl;
     const [curr, prev] = await Promise.all([
       gscQuery(t, site, { startDate: start, endDate: end, dimensions: [], rowLimit: 1 }),
       gscQuery(t, site, { startDate: prevStart, endDate: prevEnd, dimensions: [], rowLimit: 1 })
@@ -256,8 +295,8 @@ app.get('/api/gsc/overview', async (req, res) => {
 
 app.get('/api/gsc/keywords', async (req, res) => {
   try {
-    const t = await getGoogleToken();
-    const site = req.query.site || CONFIG.gsc.siteUrl;
+    const t = await getGoogleToken(req);
+    const site = req.query.site || req.config.gsc.siteUrl;
     const limit = parseInt(req.query.limit) || 100;
     const { start, end, prevStart, prevEnd } = parseDateRangeGSC(req.query);
     const [curr, prev] = await Promise.all([
@@ -284,8 +323,8 @@ app.get('/api/gsc/keywords', async (req, res) => {
 
 app.get('/api/gsc/pages', async (req, res) => {
   try {
-    const t = await getGoogleToken();
-    const site = req.query.site || CONFIG.gsc.siteUrl;
+    const t = await getGoogleToken(req);
+    const site = req.query.site || req.config.gsc.siteUrl;
     const { start, end, prevStart, prevEnd } = parseDateRangeGSC(req.query);
     const [curr, prev] = await Promise.all([
       gscQuery(t, site, { startDate: start, endDate: end, dimensions: ['page'], rowLimit: 25, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] }),
@@ -300,8 +339,8 @@ app.get('/api/gsc/pages', async (req, res) => {
 
 app.get('/api/gsc/devices', async (req, res) => {
   try {
-    const t = await getGoogleToken();
-    const site = req.query.site || CONFIG.gsc.siteUrl;
+    const t = await getGoogleToken(req);
+    const site = req.query.site || req.config.gsc.siteUrl;
     const { start, end } = parseDateRangeGSC(req.query);
     res.json(await gscQuery(t, site, { startDate: start, endDate: end, dimensions: ['device'], rowLimit: 10 }));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -309,8 +348,8 @@ app.get('/api/gsc/devices', async (req, res) => {
 
 app.get('/api/gsc/countries', async (req, res) => {
   try {
-    const t = await getGoogleToken();
-    const site = req.query.site || CONFIG.gsc.siteUrl;
+    const t = await getGoogleToken(req);
+    const site = req.query.site || req.config.gsc.siteUrl;
     const { start, end } = parseDateRangeGSC(req.query);
     res.json(await gscQuery(t, site, { startDate: start, endDate: end, dimensions: ['country'], rowLimit: 15, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] }));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -318,8 +357,8 @@ app.get('/api/gsc/countries', async (req, res) => {
 
 app.get('/api/gsc/trend', async (req, res) => {
   try {
-    const t = await getGoogleToken();
-    const site = req.query.site || CONFIG.gsc.siteUrl;
+    const t = await getGoogleToken(req);
+    const site = req.query.site || req.config.gsc.siteUrl;
     let startDate, endDate, rowLimit;
     if (req.query.startDate && req.query.endDate) {
       startDate = req.query.startDate;
@@ -340,22 +379,22 @@ app.get('/api/gsc/trend', async (req, res) => {
 // GA4 routes
 // ============================================================
 app.post('/api/ga4/report', async (req, res) => {
-  try { const t = await getGoogleToken(); res.json(await ga4Report(t, req.body)); }
+  try { const t = await getGoogleToken(req); res.json(await ga4Report(req, t, req.body)); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/ga4/overview', async (req, res) => {
   try {
     const { since, until, prevSince, prevUntil } = parseDateRange(req.query);
-    const t = await getGoogleToken();
+    const t = await getGoogleToken(req);
     const metrics = [
       { name: 'sessions' }, { name: 'totalUsers' }, { name: 'newUsers' },
       { name: 'engagementRate' }, { name: 'averageSessionDuration' },
       { name: 'bounceRate' }, { name: 'screenPageViews' }
     ];
     const [curr, prev] = await Promise.all([
-      ga4Report(t, { dateRanges: [{ startDate: since, endDate: until }], metrics }),
-      ga4Report(t, { dateRanges: [{ startDate: prevSince, endDate: prevUntil }], metrics })
+      ga4Report(req, t, { dateRanges: [{ startDate: since, endDate: until }], metrics }),
+      ga4Report(req, t, { dateRanges: [{ startDate: prevSince, endDate: prevUntil }], metrics })
     ]);
     // Normalise: flatten single-row responses into key-value objects
     const flatten = (report) => {
@@ -372,7 +411,7 @@ app.get('/api/ga4/overview', async (req, res) => {
 app.get('/api/ga4/by-channel', async (req, res) => {
   try {
     const { since, until, prevSince, prevUntil } = parseDateRange(req.query);
-    const t = await getGoogleToken();
+    const t = await getGoogleToken(req);
     const body = (dr) => ({
       dateRanges: [dr],
       metrics: [{ name: 'sessions' }, { name: 'totalUsers' }, { name: 'engagementRate' }, { name: 'bounceRate' }, { name: 'averageSessionDuration' }],
@@ -380,8 +419,8 @@ app.get('/api/ga4/by-channel', async (req, res) => {
       orderBys: [{ metric: { metricName: 'sessions' }, desc: true }]
     });
     const [curr, prev] = await Promise.all([
-      ga4Report(t, body({ startDate: since, endDate: until })),
-      ga4Report(t, body({ startDate: prevSince, endDate: prevUntil }))
+      ga4Report(req, t, body({ startDate: since, endDate: until })),
+      ga4Report(req, t, body({ startDate: prevSince, endDate: prevUntil }))
     ]);
     res.json({ current: curr, previous: prev });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -390,7 +429,7 @@ app.get('/api/ga4/by-channel', async (req, res) => {
 app.get('/api/ga4/by-source', async (req, res) => {
   try {
     const { since, until, prevSince, prevUntil } = parseDateRange(req.query);
-    const t = await getGoogleToken();
+    const t = await getGoogleToken(req);
     const body = (dr) => ({
       dateRanges: [dr],
       metrics: [{ name: 'sessions' }, { name: 'totalUsers' }, { name: 'engagementRate' }],
@@ -399,8 +438,8 @@ app.get('/api/ga4/by-source', async (req, res) => {
       limit: 20
     });
     const [curr, prev] = await Promise.all([
-      ga4Report(t, body({ startDate: since, endDate: until })),
-      ga4Report(t, body({ startDate: prevSince, endDate: prevUntil }))
+      ga4Report(req, t, body({ startDate: since, endDate: until })),
+      ga4Report(req, t, body({ startDate: prevSince, endDate: prevUntil }))
     ]);
     res.json({ current: curr, previous: prev });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -409,8 +448,8 @@ app.get('/api/ga4/by-source', async (req, res) => {
 app.get('/api/ga4/top-pages', async (req, res) => {
   try {
     const { since, until } = parseDateRange(req.query);
-    const t = await getGoogleToken();
-    res.json(await ga4Report(t, {
+    const t = await getGoogleToken(req);
+    res.json(await ga4Report(req, t, {
       dateRanges: [{ startDate: since, endDate: until }],
       metrics: [
         { name: 'screenPageViews' }, { name: 'totalUsers' }, { name: 'sessions' },
@@ -427,8 +466,8 @@ app.get('/api/ga4/top-pages', async (req, res) => {
 app.get('/api/ga4/devices', async (req, res) => {
   try {
     const { since, until } = parseDateRange(req.query);
-    const t = await getGoogleToken();
-    res.json(await ga4Report(t, {
+    const t = await getGoogleToken(req);
+    res.json(await ga4Report(req, t, {
       dateRanges: [{ startDate: since, endDate: until }],
       metrics: [{ name: 'sessions' }, { name: 'totalUsers' }, { name: 'engagementRate' }],
       dimensions: [{ name: 'deviceCategory' }]
@@ -439,8 +478,8 @@ app.get('/api/ga4/devices', async (req, res) => {
 app.get('/api/ga4/geography', async (req, res) => {
   try {
     const { since, until } = parseDateRange(req.query);
-    const t = await getGoogleToken();
-    res.json(await ga4Report(t, {
+    const t = await getGoogleToken(req);
+    res.json(await ga4Report(req, t, {
       dateRanges: [{ startDate: since, endDate: until }],
       metrics: [{ name: 'sessions' }, { name: 'totalUsers' }],
       dimensions: [{ name: 'country' }],
@@ -453,8 +492,8 @@ app.get('/api/ga4/geography', async (req, res) => {
 app.get('/api/ga4/daily-trend', async (req, res) => {
   try {
     const { since, until } = parseDateRange(req.query, 90);
-    const t = await getGoogleToken();
-    res.json(await ga4Report(t, {
+    const t = await getGoogleToken(req);
+    res.json(await ga4Report(req, t, {
       dateRanges: [{ startDate: since, endDate: until }],
       metrics: [{ name: 'sessions' }, { name: 'totalUsers' }, { name: 'newUsers' }],
       dimensions: [{ name: 'date' }],
@@ -496,28 +535,28 @@ function srCached(key, fn) {
 }
 
 app.get('/api/semrush/overview', srCached('overview', async (req) => {
-  const domain = req.query.domain || CONFIG.semrush.domain;
-  const db = req.query.db || CONFIG.semrush.database;
-  const r = await fetch(`https://api.semrush.com/?type=domain_rank&key=${CONFIG.semrush.apiKey}&export_columns=Dn,Rk,Or,Ot,Oc,Ad,At,Ac&domain=${domain}&database=${db}`);
+  const domain = req.query.domain || req.config.semrush.domain;
+  const db = req.query.db || req.config.semrush.database;
+  const r = await fetch(`https://api.semrush.com/?type=domain_rank&key=${req.config.semrush.apiKey}&export_columns=Dn,Rk,Or,Ot,Oc,Ad,At,Ac&domain=${domain}&database=${db}`);
   const text = await r.text();
   if (text.includes('ERROR')) throw new Error(text.trim());
   return { data: parseSemrushCSV(text)[0] || null };
 }));
 
 app.get('/api/semrush/keywords', srCached('keywords', async (req) => {
-  const domain = req.query.domain || CONFIG.semrush.domain;
-  const db = req.query.db || CONFIG.semrush.database;
+  const domain = req.query.domain || req.config.semrush.domain;
+  const db = req.query.db || req.config.semrush.database;
   const limit = req.query.limit || 500;
-  const r = await fetch(`https://api.semrush.com/?type=domain_organic&key=${CONFIG.semrush.apiKey}&display_limit=${limit}&export_columns=Ph,Po,Pp,Nq,Cp,Ur,Tr,Kd,Td&domain=${domain}&database=${db}&display_sort=tr_desc`);
+  const r = await fetch(`https://api.semrush.com/?type=domain_organic&key=${req.config.semrush.apiKey}&display_limit=${limit}&export_columns=Ph,Po,Pp,Nq,Cp,Ur,Tr,Kd,Td&domain=${domain}&database=${db}&display_sort=tr_desc`);
   const text = await r.text();
   if (text.startsWith('ERROR')) throw new Error(text.trim());
   return { rows: parseSemrushCSV(text) };
 }));
 
 app.get('/api/semrush/position-distribution', srCached('posdist', async (req) => {
-  const domain = req.query.domain || CONFIG.semrush.domain;
-  const db = req.query.db || CONFIG.semrush.database;
-  const r = await fetch(`https://api.semrush.com/?type=domain_organic&key=${CONFIG.semrush.apiKey}&display_limit=500&export_columns=Ph,Po,Nq&domain=${domain}&database=${db}`);
+  const domain = req.query.domain || req.config.semrush.domain;
+  const db = req.query.db || req.config.semrush.database;
+  const r = await fetch(`https://api.semrush.com/?type=domain_organic&key=${req.config.semrush.apiKey}&display_limit=500&export_columns=Ph,Po,Nq&domain=${domain}&database=${db}`);
   const text = await r.text();
   if (text.startsWith('ERROR')) throw new Error(text.trim());
   const rows = parseSemrushCSV(text);
@@ -534,18 +573,18 @@ app.get('/api/semrush/position-distribution', srCached('posdist', async (req) =>
 }));
 
 app.get('/api/semrush/competitors', srCached('competitors', async (req) => {
-  const domain = req.query.domain || CONFIG.semrush.domain;
-  const db = req.query.db || CONFIG.semrush.database;
-  const r = await fetch(`https://api.semrush.com/?type=domain_organic_organic&key=${CONFIG.semrush.apiKey}&display_limit=8&export_columns=Dn,Cr,Np,Or,Ot,Oc,Ad&domain=${domain}&database=${db}`);
+  const domain = req.query.domain || req.config.semrush.domain;
+  const db = req.query.db || req.config.semrush.database;
+  const r = await fetch(`https://api.semrush.com/?type=domain_organic_organic&key=${req.config.semrush.apiKey}&display_limit=8&export_columns=Dn,Cr,Np,Or,Ot,Oc,Ad&domain=${domain}&database=${db}`);
   const text = await r.text();
   if (text.startsWith('ERROR')) throw new Error(text.trim());
   return { rows: parseSemrushCSV(text) };
 }));
 
 app.get('/api/semrush/backlinks', srCached('backlinks', async (req) => {
-  const domain = req.query.domain || CONFIG.semrush.domain;
-  const db = req.query.db || CONFIG.semrush.database;
-  const r = await fetch(`https://api.semrush.com/?type=domain_rank&key=${CONFIG.semrush.apiKey}&export_columns=Dn,Rk,Or,Ot,Oc,Bl&domain=${domain}&database=${db}`);
+  const domain = req.query.domain || req.config.semrush.domain;
+  const db = req.query.db || req.config.semrush.database;
+  const r = await fetch(`https://api.semrush.com/?type=domain_rank&key=${req.config.semrush.apiKey}&export_columns=Dn,Rk,Or,Ot,Oc,Bl&domain=${domain}&database=${db}`);
   const text = await r.text();
   if (text.startsWith('ERROR')) throw new Error(text.trim());
   const row = parseSemrushCSV(text)[0] || {};
@@ -573,42 +612,64 @@ const DEFAULT_COMPETITORS = {
   'workbenchcentral.com':'Workbench'
 };
 
-// Dynamic in-memory cache, hydrated from Supabase on startup + refreshed on
-// every add/delete. Falls back to defaults if Supabase isn't configured.
-// Declared as `let` (not `const`) so refreshCompetitorsCache() can reassign.
-let _competitors = Object.entries(DEFAULT_COMPETITORS).map(([domain, display_name]) => ({ id: domain, domain, display_name, is_active: true }));
-let TRACKED_COMPETITORS = Object.keys(DEFAULT_COMPETITORS);
-let COMP_NAMES = { ...DEFAULT_COMPETITORS };
+// Per-tenant in-memory competitor cache. Each tenant has its own list of
+// tracked brands looked for in AEO responses + SEMrush metrics.
+//   _competitorsByTenant[tenant] = [{id, domain, display_name, is_active}, ...]
+//   _trackedByTenant[tenant]     = [domain, ...]  (active-only)
+//   _compNamesByTenant[tenant]   = { domain: display_name } (active-only)
+const _competitorsByTenant = {};
+const _trackedByTenant     = {};
+const _compNamesByTenant   = {};
 
-async function refreshCompetitorsCache() {
+// Seed each tenant with the Kynection-era defaults until the first DB hydrate
+// finishes — keeps mention detection working from t=0.
+for (const t of KNOWN_TENANTS) {
+  _competitorsByTenant[t] = Object.entries(DEFAULT_COMPETITORS).map(([domain, display_name]) => ({ id: domain, domain, display_name, is_active: true }));
+  _trackedByTenant[t]     = Object.keys(DEFAULT_COMPETITORS);
+  _compNamesByTenant[t]   = { ...DEFAULT_COMPETITORS };
+}
+
+function getCompetitorList(tenant) { return _competitorsByTenant[tenant] || []; }
+function getTrackedDomains(tenant)  { return _trackedByTenant[tenant] || []; }
+function getCompNamesMap(tenant)    { return _compNamesByTenant[tenant] || {}; }
+
+async function refreshCompetitorsCache(tenant) {
+  if (!tenant) {
+    // Default behaviour: refresh all known tenants.
+    for (const t of KNOWN_TENANTS) await refreshCompetitorsCache(t);
+    return;
+  }
   try {
-    if (db.USE_SUPABASE) await db.seedCompetitorsIfEmpty(DEFAULT_COMPETITORS);
-    const rows = await db.listCompetitors({ activeOnly: false });
-    if (rows && rows.length) {
-      _competitors = rows;
-      const active = rows.filter(r => r.is_active);
-      TRACKED_COMPETITORS = active.map(r => r.domain);
-      COMP_NAMES = Object.fromEntries(active.map(r => [r.domain, r.display_name]));
-      console.log(`🏁 Competitors: ${active.length} active (of ${rows.length})`);
-    }
-  } catch (e) { console.warn('competitors hydrate failed:', e.message); }
+    await db.forTenant(tenant, async () => {
+      await db.seedCompetitorsIfEmpty(DEFAULT_COMPETITORS);
+      const rows = await db.listCompetitors({ activeOnly: false });
+      if (rows && rows.length) {
+        _competitorsByTenant[tenant] = rows;
+        const active = rows.filter(r => r.is_active);
+        _trackedByTenant[tenant]     = active.map(r => r.domain);
+        _compNamesByTenant[tenant]   = Object.fromEntries(active.map(r => [r.domain, r.display_name]));
+        console.log(`🏁 Competitors [${tenant}]: ${active.length} active (of ${rows.length})`);
+      }
+    });
+  } catch (e) { console.warn(`competitors hydrate [${tenant}] failed:`, e.message); }
 }
 refreshCompetitorsCache();
 
 app.get('/api/semrush/tracked-competitors', srCached('tracked-comp', async (req) => {
-  const db = req.query.db || CONFIG.semrush.database;
+  const db = req.query.db || req.config.semrush.database;
   const fetchDomain = async (domain) => {
     try {
-      const r = await fetch(`https://api.semrush.com/?type=domain_rank&key=${CONFIG.semrush.apiKey}&export_columns=Dn,Rk,Or,Ot,Oc,Bl&domain=${domain}&database=${db}`);
+      const r = await fetch(`https://api.semrush.com/?type=domain_rank&key=${req.config.semrush.apiKey}&export_columns=Dn,Rk,Or,Ot,Oc,Bl&domain=${domain}&database=${db}`);
       const text = await r.text();
       if (text.startsWith('ERROR')) return { Dn: domain, Or: 0, Ot: 0, Oc: 0, Bl: 0, Rk: 0 };
       return parseSemrushCSV(text)[0] || { Dn: domain };
     } catch(e) { return { Dn: domain }; }
   };
-  // Fetch all 40 in parallel, batched in groups of 8
+  // Fetch all tracked competitors for THIS tenant in parallel, batched in groups of 8
+  const tracked = getTrackedDomains(req.tenant);
   const results = [];
-  for (let i = 0; i < TRACKED_COMPETITORS.length; i += 8) {
-    const batch = TRACKED_COMPETITORS.slice(i, i + 8);
+  for (let i = 0; i < tracked.length; i += 8) {
+    const batch = tracked.slice(i, i + 8);
     results.push(...await Promise.all(batch.map(fetchDomain)));
   }
   return { rows: results };
@@ -1030,21 +1091,22 @@ app.get('/api/hubspot/leads-pipeline', async (req, res) => {
 // ============================================================
 // YouTube Analytics routes
 // ============================================================
-let _ytChannelId = null;
+const _ytChannelIdByTenant = {};
 
 // YouTube response cache (30-minute TTL — YT Analytics data lags 24-48h anyway).
 // Now backed by db.cache* (L1 in-memory + L2 Supabase api_cache).
+// Cache keys are prefixed with the tenant so KYN and IR don't collide.
 const YT_CACHE_TTL_SECONDS = 30 * 60;
-const ytCacheGet = key => db.cacheGet('youtube:' + key, YT_CACHE_TTL_SECONDS);
-const ytCacheSet = (key, data) => db.cacheSet('youtube:' + key, 'youtube', data);
+const ytCacheGet = (req, key) => db.cacheGet(`youtube:${req.tenant}:` + key, YT_CACHE_TTL_SECONDS);
+const ytCacheSet = (req, key, data) => db.cacheSet(`youtube:${req.tenant}:` + key, 'youtube', data);
 
-async function getChannelId() {
-  if (_ytChannelId) return _ytChannelId;
-  const t = await getYTToken();
+async function getChannelId(req) {
+  if (_ytChannelIdByTenant[req.tenant]) return _ytChannelIdByTenant[req.tenant];
+  const t = await getYTToken(req);
   const r = await fetch('https://www.googleapis.com/youtube/v3/channels?part=id,snippet,statistics&mine=true', { headers: { Authorization: `Bearer ${t}` } });
   const d = await r.json();
-  _ytChannelId = d.items?.[0]?.id;
-  return _ytChannelId;
+  _ytChannelIdByTenant[req.tenant] = d.items?.[0]?.id;
+  return _ytChannelIdByTenant[req.tenant];
 }
 
 function ytDateRange(days) {
@@ -1058,9 +1120,9 @@ app.get('/api/youtube/overview', async (req, res) => {
   try {
     const days = parseInt(req.query.days) || 28;
     const cacheKey = `overview_${days}`;
-    const cached = await ytCacheGet(cacheKey);
+    const cached = await ytCacheGet(req, cacheKey);
     if (cached) return res.json(cached);
-    const t = await getYTToken();
+    const t = await getYTToken(req);
     const { start, end } = ytDateRange(days);
     const prevEnd = new Date(Date.now() - days * 864e5); const prevFmtEnd = prevEnd.toISOString().split('T')[0];
     const prevStart = new Date(prevEnd.getTime() - days * 864e5); const prevFmtStart = prevStart.toISOString().split('T')[0];
@@ -1070,7 +1132,7 @@ app.get('/api/youtube/overview', async (req, res) => {
       fetch(`https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==MINE&startDate=${prevFmtStart}&endDate=${prevFmtEnd}&metrics=views,estimatedMinutesWatched,averageViewDuration,subscribersGained`, { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json())
     ]);
     const result = { channel: channel.items?.[0], current: curr, previous: prev };
-    ytCacheSet(cacheKey, result);
+    ytCacheSet(req, cacheKey, result);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1079,104 +1141,156 @@ app.get('/api/youtube/top-videos', async (req, res) => {
   try {
     const days = parseInt(req.query.days) || 28;
     const cacheKey = `top-videos_${days}`;
-    const cached = await ytCacheGet(cacheKey);
+    const cached = await ytCacheGet(req, cacheKey);
     if (cached) return res.json(cached);
-    const t = await getYTToken();
+    const t = await getYTToken(req);
     const { start, end } = ytDateRange(days);
     const analytics = await fetch(
       `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==MINE&startDate=${start}&endDate=${end}&metrics=views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,likes&dimensions=video&sort=-views&maxResults=20`,
       { headers: { Authorization: `Bearer ${t}` } }
     ).then(r => r.json());
 
-    if (!analytics.rows?.length) { ytCacheSet(cacheKey, { rows: [] }); return res.json({ rows: [] }); }
+    if (!analytics.rows?.length) { ytCacheSet(req, cacheKey, { rows: [] }); return res.json({ rows: [] }); }
     const videoIds = analytics.rows.map(r => r[0]).join(',');
     const videos = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoIds}`, { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json());
     const vMap = {};
     (videos.items || []).forEach(v => { vMap[v.id] = v; });
     const cols = analytics.columnHeaders?.map(c => c.name) || ['video','views','estimatedMinutesWatched','averageViewDuration','averageViewPercentage','likes'];
     const result = { rows: analytics.rows.map(row => ({ videoId: row[0], title: vMap[row[0]]?.snippet?.title || row[0], thumbnail: vMap[row[0]]?.snippet?.thumbnails?.default?.url, publishedAt: vMap[row[0]]?.snippet?.publishedAt, views: row[1], watchMinutes: row[2], avgDuration: row[3], avgPercentage: row[4], likes: row[5] })) };
-    ytCacheSet(cacheKey, result);
+    ytCacheSet(req, cacheKey, result);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/youtube/traffic-sources', async (req, res) => {
   try {
-    const cached = await ytCacheGet('traffic-sources');
+    const cached = await ytCacheGet(req, 'traffic-sources');
     if (cached) return res.json(cached);
-    const t = await getYTToken();
+    const t = await getYTToken(req);
     const { start, end } = ytDateRange(28);
     const result = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==MINE&startDate=${start}&endDate=${end}&metrics=views,estimatedMinutesWatched&dimensions=insightTrafficSourceType&sort=-views`, { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json());
-    ytCacheSet('traffic-sources', result);
+    ytCacheSet(req, 'traffic-sources', result);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/youtube/trend', async (req, res) => {
   try {
-    const cached = await ytCacheGet('trend');
+    const cached = await ytCacheGet(req, 'trend');
     if (cached) return res.json(cached);
-    const t = await getYTToken();
+    const t = await getYTToken(req);
     const { start, end } = ytDateRange(90);
     const result = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==MINE&startDate=${start}&endDate=${end}&metrics=views,estimatedMinutesWatched,subscribersGained&dimensions=day&sort=day`, { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json());
-    ytCacheSet('trend', result);
+    ytCacheSet(req, 'trend', result);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/youtube/demographics', async (req, res) => {
   try {
-    const cached = await ytCacheGet('demographics');
+    const cached = await ytCacheGet(req, 'demographics');
     if (cached) return res.json(cached);
-    const t = await getYTToken();
+    const t = await getYTToken(req);
     const { start, end } = ytDateRange(28);
     const result = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==MINE&startDate=${start}&endDate=${end}&metrics=viewerPercentage&dimensions=ageGroup,gender`, { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json());
-    ytCacheSet('demographics', result);
+    ytCacheSet(req, 'demographics', result);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ============================================================
-// GSC auto-detect
+// GSC auto-detect (per-tenant)
 // ============================================================
-async function detectGSCSite() {
-  try {
-    const t = await getGoogleToken();
-    const d = await fetch('https://www.googleapis.com/webmasters/v3/sites', { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json());
-    const sites = (d.siteEntry || []).map(s => s.siteUrl);
-    const kynection = sites.find(s => s.startsWith('sc-domain:') && s.includes('kynection')) || sites.find(s => s.includes('kynection'));
-    CONFIG.gsc.siteUrl = kynection || sites[0] || 'https://www.kynection.com.au/';
-    console.log(`✅ GSC: ${CONFIG.gsc.siteUrl}`);
-  } catch (e) { CONFIG.gsc.siteUrl = 'https://www.kynection.com.au/'; }
+// Each tenant has its own Google account / refresh token / verified domain.
+// We discover the right GSC site once per tenant, cache it, and inject it
+// into req.config.gsc.siteUrl via the middleware below so all the existing
+// GSC routes just read req.config.gsc.siteUrl as before.
+const _gscSiteByTenant = {};  // tenant -> resolved site URL string
+const _gscDetectionPromise = {}; // tenant -> in-flight promise (dedupe concurrent first hits)
+
+async function detectGSCSite(tenant) {
+  if (_gscSiteByTenant[tenant]) return _gscSiteByTenant[tenant];
+  if (_gscDetectionPromise[tenant]) return _gscDetectionPromise[tenant];
+  _gscDetectionPromise[tenant] = (async () => {
+    const tenantCfg = buildConfig(tenant);
+    const fakeReq = { tenant, config: tenantCfg };
+    const fallback = `https://www.${tenantCfg.brand.domain}/`;
+    try {
+      const t = await getGoogleToken(fakeReq);
+      const d = await fetch('https://www.googleapis.com/webmasters/v3/sites', { headers: { Authorization: `Bearer ${t}` } }).then(r => r.json());
+      const sites = (d.siteEntry || []).map(s => s.siteUrl);
+      // Match by the brand's bare domain root (kynection / intelligentresourcing)
+      const bareDomain = tenantCfg.brand.domain.split('.')[0].toLowerCase();
+      const matched = sites.find(s => s.startsWith('sc-domain:') && s.toLowerCase().includes(bareDomain))
+                   || sites.find(s => s.toLowerCase().includes(bareDomain));
+      _gscSiteByTenant[tenant] = matched || sites[0] || fallback;
+      console.log(`✅ GSC [${tenant}]: ${_gscSiteByTenant[tenant]}`);
+    } catch (e) {
+      _gscSiteByTenant[tenant] = fallback;
+      console.warn(`⚠ GSC [${tenant}] detection failed: ${e.message} — using fallback ${fallback}`);
+    } finally {
+      delete _gscDetectionPromise[tenant];
+    }
+    return _gscSiteByTenant[tenant];
+  })();
+  return _gscDetectionPromise[tenant];
 }
 
-// ── AEO Results persistence ─────────────────────────────────
-// In-memory cache, hydrated from db (Supabase or JSON fallback) on startup.
-// All mutation paths persist incrementally via the db module.
-let _aeoResults = {};
-db.loadAllAeoResults()
-  .then(d => { _aeoResults = d; console.log(`📊 AEO: hydrated ${Object.keys(d).length} prompts`); })
-  .catch(e => { console.error('Failed to load AEO results:', e.message); });
+// ── AEO Results persistence (per-tenant) ────────────────────
+// In-memory cache, keyed by tenant. Each tenant's data hydrates from its own
+// Supabase project on startup. Mutation paths persist incrementally via the
+// tenant-scoped db helpers (db.forTenant(t, () => ...)).
+const _aeoResultsByTenant = {};
+for (const t of KNOWN_TENANTS) _aeoResultsByTenant[t] = {};
 
-// JSON-fallback writer (only used when Supabase isn't configured).
-function saveAeoResults() {
-  if (db.USE_SUPABASE) return; // Supabase path persists per-mutation
-  try { fs.writeFileSync(process.env.AEO_RESULTS_FILE || path.join(__dirname, 'aeo-results.json'), JSON.stringify(_aeoResults)); } catch(e) {}
+// Hydrate each tenant's cache in parallel at boot.
+for (const t of KNOWN_TENANTS) {
+  db.forTenant(t, () => db.loadAllAeoResults())
+    .then(d => { _aeoResultsByTenant[t] = d; console.log(`📊 AEO [${t}]: hydrated ${Object.keys(d).length} prompts`); })
+    .catch(e => console.error(`Failed to load AEO results [${t}]:`, e.message));
+}
+
+// Helper for routes — `req.tenant` is set by the tenant middleware.
+function aeoResultsFor(req) { return _aeoResultsByTenant[req.tenant] || (_aeoResultsByTenant[req.tenant] = {}); }
+
+// JSON-fallback writer (only used when Supabase isn't configured for this
+// tenant). Each tenant has its own JSON file path. Run from within a
+// db.forTenant() context so currentTenant() resolves correctly inside db.js.
+function saveAeoResults(req) {
+  const tenant = req?.tenant || 'kyn';
+  if (db.getClient(tenant)) return; // Supabase path persists per-mutation
+  const file = tenant === 'kyn'
+    ? (process.env.AEO_RESULTS_FILE || path.join(__dirname, 'aeo-results.json'))
+    : path.join(__dirname, `aeo-results-${tenant}.json`);
+  try { fs.writeFileSync(file, JSON.stringify(_aeoResultsByTenant[tenant] || {})); } catch(e) {}
 }
 
 // COMP_NAMES is now declared as `let` near the top of the file alongside
 // the dynamic competitors cache — see refreshCompetitorsCache().
 
-function checkMentions(text) {
+// Tenant-aware mention detector. `opts` is { brandName, brandDomain, tenant }.
+// Without opts (legacy callers), falls back to the original Kynection
+// hardcoded behaviour.
+function checkMentions(text, opts = {}) {
+  const tenant     = opts.tenant || 'kyn';
+  const brandName  = (opts.brandName  || 'Kynection').toLowerCase();
+  // The "brand needle" for short-text scans — first word of the brand name,
+  // lowercase, alpha-only. "Intelligent Resourcing" -> "intelligent",
+  // "Kynection" -> "kynection".
+  const brandNeedle = brandName.split(/\s+/)[0].replace(/[^a-z0-9]/g,'') || brandName;
+  const brandDomain = (opts.brandDomain || 'kynection.com').toLowerCase();
+  const tracked     = getTrackedDomains(tenant);
+  const compNames   = getCompNamesMap(tenant);
+
   const lower = text.toLowerCase();
-  const mentioned = lower.includes('kynection');
-  const cited = lower.includes('kynection.com');
+  const mentioned = lower.includes(brandNeedle);
+  const cited = lower.includes(brandDomain);
   // attributedCitation is now determined by sourceUrls (structured annotations), not text matching.
   // It is set to false here and overridden after the call when sourceUrls are available.
   const attributedCitation = false;
   const sources = lower.includes('http') || lower.includes('www.') || (lower.match(/\[[\d]+\]/) !== null);
-  const competitorsMentioned = TRACKED_COMPETITORS.filter(domain => {
-    const name = (COMP_NAMES[domain] || domain.split('.')[0]).toLowerCase();
+  const competitorsMentioned = tracked.filter(domain => {
+    const name = (compNames[domain] || domain.split('.')[0]).toLowerCase();
     return lower.includes(domain) || lower.includes(name);
   });
 
@@ -1184,28 +1298,28 @@ function checkMentions(text) {
   let mentionPosition = null;
   let mentionRank = null;
   if (mentioned) {
-    const kynPos = lower.indexOf('kynection');
-    const frac = kynPos / lower.length;
+    const brandPos = lower.indexOf(brandNeedle);
+    const frac = brandPos / lower.length;
     if (frac < 0.25) mentionPosition = 'early';
     else if (frac < 0.60) mentionPosition = 'mid';
     else mentionPosition = 'late';
-    // Rank: count how many brands appear before Kynection (1 = first mentioned)
+    // Rank: count how many competitor brands appear before our brand (1 = first mentioned)
     mentionRank = 1;
     competitorsMentioned.forEach(domain => {
-      const name = (COMP_NAMES[domain] || domain.split('.')[0]).toLowerCase();
+      const name = (compNames[domain] || domain.split('.')[0]).toLowerCase();
       const positions = [lower.indexOf(name), lower.indexOf(domain)].filter(p => p !== -1);
       if (positions.length) {
         const firstPos = Math.min(...positions);
-        if (firstPos < kynPos) mentionRank++;
+        if (firstPos < brandPos) mentionRank++;
       }
     });
   }
 
-  // Sentiment: analyse context around Kynection mention
+  // Sentiment: analyse context around brand mention
   let sentiment = null;
   if (mentioned) {
-    const kynPos = lower.indexOf('kynection');
-    const ctx = lower.slice(Math.max(0, kynPos - 150), kynPos + 350);
+    const brandPos = lower.indexOf(brandNeedle);
+    const ctx = lower.slice(Math.max(0, brandPos - 150), brandPos + 350);
     const posWords = ['leading','best','excellent','top','recommend','trusted','preferred','proven','comprehensive','robust','powerful','popular','strong','effective','ideal','great','impressive','purpose-built','specialised','specialized','dedicated','award','innovative','advanced'];
     const negWords = ['limited','lacks','lacking','poor','expensive','costly','difficult','complex','unreliable','slow','outdated','basic','weak','inferior','concern','however','but ','although','despite','not ideal','smaller','niche'];
     const posScore = posWords.filter(w => ctx.includes(w)).length;
@@ -1216,7 +1330,7 @@ function checkMentions(text) {
   return { mentioned, cited, attributedCitation, sources, competitorsMentioned, mentionPosition, mentionRank, sentiment };
 }
 
-app.get('/api/aeo/results', (req, res) => res.json(_aeoResults));
+app.get('/api/aeo/results', (req, res) => res.json(aeoResultsFor(req)));
 
 // ── Competitors ───────────────────────────────────────────────
 app.get('/api/aeo/competitors', async (req, res) => {
@@ -1314,15 +1428,16 @@ app.delete('/api/aeo/stream-history/:id', async (req, res) => {
 app.post('/api/aeo/delete-runs', async (req, res) => {
   const { promptId, indices } = req.body || {};
   if (!promptId || !Array.isArray(indices)) return res.status(400).json({ error: 'Invalid request' });
-  if (_aeoResults[promptId]?.runs) {
-    const runs = _aeoResults[promptId].runs;
+  const results = aeoResultsFor(req);
+  if (results[promptId]?.runs) {
+    const runs = results[promptId].runs;
     const valid = indices.filter(i => i >= 0 && i < runs.length);
     const dbIds = valid.map(i => runs[i]._dbId).filter(Boolean);
     const sorted = [...valid].sort((a, b) => b - a);
     sorted.forEach(i => runs.splice(i, 1));
     try {
       await db.deleteAeoRuns(dbIds);
-      saveAeoResults();
+      saveAeoResults(req);
     } catch(e) {
       return res.status(500).json({ error: e.message });
     }
@@ -1334,28 +1449,30 @@ app.post('/api/aeo/delete-runs', async (req, res) => {
 app.post('/api/aeo/backfill', async (req, res) => {
   let updated = 0;
   const dbUpdates = [];
-  for (const data of Object.values(_aeoResults)) {
+  const brandNeedle = req.config.brand.name.toLowerCase().split(/\s+/)[0].replace(/[^a-z0-9]/g,'');
+  const brandDomainLower = req.config.brand.domain.toLowerCase();
+  for (const data of Object.values(aeoResultsFor(req))) {
     for (const run of (data.runs || [])) {
       let changed = false;
       const text = run.response || '';
-      const checks = checkMentions(text);
+      const checks = checkMentions(text, { tenant: req.tenant, brandName: req.config.brand.name, brandDomain: req.config.brand.domain });
 
       // Re-derive attributedCitation from sourceUrls ONLY (structured annotations)
       const urls = run.sourceUrls || [];
-      const kynInSources = urls.some(s => {
-        const d = typeof s === 'string' ? s : (s.domain || '');
-        const t = typeof s === 'object' ? (s.title || '') : '';
-        return d.includes('kynection') || t.toLowerCase().includes('kynection');
+      const brandInSources = urls.some(s => {
+        const d = (typeof s === 'string' ? s : (s.domain || '')).toLowerCase();
+        const t = (typeof s === 'object' ? (s.title || '') : '').toLowerCase();
+        return d.includes(brandDomainLower) || d.includes(brandNeedle) || t.includes(brandNeedle);
       });
 
-      // mentioned: Kynection named anywhere in response text
+      // mentioned: brand named anywhere in response text
       if (run.mentioned !== checks.mentioned) { run.mentioned = checks.mentioned; changed = true; }
 
-      // cited: purely text-based — "kynection.com" appears in response text
+      // cited: purely text-based — brand domain appears in response text
       if (run.cited !== checks.cited) { run.cited = checks.cited; changed = true; }
 
       // attributedCitation: structured source annotation only (strictest)
-      if (run.attributedCitation !== kynInSources) { run.attributedCitation = kynInSources; changed = true; }
+      if (run.attributedCitation !== brandInSources) { run.attributedCitation = brandInSources; changed = true; }
 
       // Backfill position/rank/sentiment if missing
       if (run.mentionPosition === undefined || run.mentionRank === undefined || run.sentiment === undefined) {
@@ -1383,7 +1500,7 @@ app.post('/api/aeo/backfill', async (req, res) => {
   }
   try {
     await db.updateAeoRuns(dbUpdates);
-    saveAeoResults();
+    saveAeoResults(req);
   } catch(e) {
     return res.status(500).json({ error: e.message });
   }
@@ -1577,7 +1694,8 @@ app.post('/api/aeo/stream', async (req, res) => {
 
   // Process a single prompt: fire all selected models in parallel, await all.
   const processPrompt = async (p) => {
-    if (!_aeoResults[p.id]) _aeoResults[p.id] = { prompt:p.text, topic:p.topic, tag:p.tag, runs:[] };
+    const store = aeoResultsFor(req);
+    if (!store[p.id]) store[p.id] = { prompt:p.text, topic:p.topic, tag:p.tag, runs:[] };
     try { await db.upsertAeoPrompt(p.id, { prompt:p.text, topic:p.topic, tag:p.tag }); } catch(e) { console.error('upsertAeoPrompt:', e.message); }
 
     // Each model's IIFE streams its own result/error SSE event as soon as it
@@ -1596,18 +1714,20 @@ app.post('/api/aeo/stream', async (req, res) => {
         } else {
           responseText = result || '';
         }
-        const checks = checkMentions(responseText);
-        // Attributed Citation: true ONLY when sourceUrls contain a kynection.com.au link
-        const kynInSources = sourceUrls.some(s => {
-          const d = typeof s === 'string' ? s : (s.domain||'');
-          const t = typeof s === 'object' ? (s.title||'') : '';
-          return d.includes('kynection') || t.toLowerCase().includes('kynection');
+        const checks = checkMentions(responseText, { tenant: req.tenant, brandName: req.config.brand.name, brandDomain: req.config.brand.domain });
+        // Attributed Citation: true ONLY when sourceUrls contain a tenant brand-domain link
+        const brandNeedle = req.config.brand.name.toLowerCase().split(/\s+/)[0].replace(/[^a-z0-9]/g,'');
+        const brandDomainLower = req.config.brand.domain.toLowerCase();
+        const brandInSources = sourceUrls.some(s => {
+          const d = (typeof s === 'string' ? s : (s.domain||'')).toLowerCase();
+          const t = (typeof s === 'object' ? (s.title||'') : '').toLowerCase();
+          return d.includes(brandDomainLower) || d.includes(brandNeedle) || t.includes(brandNeedle);
         });
-        checks.attributedCitation = kynInSources;
+        checks.attributedCitation = brandInSources;
         const run = { date:new Date().toISOString().slice(0,10), model, ...checks, sourceUrls, promptType:p.tag, prompt:p.text, response:responseText.slice(0,15000) };
         try { await db.insertAeoRun(p.id, run); } catch(e) { console.error('insertAeoRun:', e.message); }
-        _aeoResults[p.id].runs.unshift(run);
-        saveAeoResults();
+        store[p.id].runs.unshift(run);
+        saveAeoResults(req);
         send({ type:'result', promptId:p.id, run, done:++done, total });
       } catch(e) { send({ type:'error', model, prompt:p.text, error:e.message }); done++; }
     })());
@@ -1635,11 +1755,12 @@ app.post('/api/aeo/suggest', async (req, res) => {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || CONFIG.anthropic?.apiKey;
   if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set' });
 
-  const systemPrompt = `You are an AEO (Answer Engine Optimisation) expert helping a B2B SaaS company called Kynection generate search prompts that people type into AI assistants like ChatGPT, Gemini, and Perplexity. Kynection sells field service management, job management, workforce management, and compliance software to Australian businesses.
+  const brand = req.config.brand;
+  const systemPrompt = `You are an AEO (Answer Engine Optimisation) expert helping a company called ${brand.name} (${brand.domain}) generate search prompts that people type into AI assistants like ChatGPT, Gemini, and Perplexity.
 
 Generate 10 realistic, specific prompts that a potential buyer in ${country || 'Australia'} might type into an AI assistant when searching for solutions related to: "${topic}".
 
-Prompt type: ${type || 'Non-Branded'} (${type === 'Branded' ? 'may include Kynection by name' : 'should NOT mention Kynection by name — these are discovery queries'}).
+Prompt type: ${type || 'Non-Branded'} (${type === 'Branded' ? `may include ${brand.name} by name` : `should NOT mention ${brand.name} by name — these are discovery queries`}).
 
 Rules:
 - Each prompt should be a natural question or search phrase (not a command)
@@ -1836,7 +1957,7 @@ function scoreUrlRelevance(urls, topic) {
   }).sort((a, b) => b.score - a.score);
 }
 
-async function searchExternalSourcesForSnipe(topic) {
+async function searchExternalSourcesForSnipe(topic, excludeDomain) {
   const token = process.env.DATAFORSEO_TOKEN;
   if (!token) return [];
   // Run two targeted searches to get diverse, high-quality sources
@@ -1859,7 +1980,7 @@ async function searchExternalSourcesForSnipe(topic) {
       const items = d.tasks?.[0]?.result?.[0]?.items || [];
       const organic = items
         .filter(i => i.type === 'organic' && i.url && i.title)
-        .filter(i => !i.url.includes('kynection.com.au'))
+        .filter(i => !excludeDomain || !i.url.toLowerCase().includes(excludeDomain.toLowerCase()))
         // Prefer authoritative domains
         .map(i => ({
           url: i.url,
@@ -1954,11 +2075,12 @@ app.post('/api/snipe/titles', async (req, res) => {
   }
 
   try {
+    const brand = req.config.brand;
     const result = await callSnipeAI({
       fast: true,
       maxTokens: 400,
-      system: 'You are an SEO content strategist for Kynection (kynection.com.au), an Australian ERP platform for construction and field service. Generate 3 alternative article titles. Return ONLY a JSON array of 3 strings. No other text.',
-      user: `Competitor article title: "${originalTitle}"\nCompetitor URL: ${url}\n\nGenerate 3 Kynection article titles on this same topic. Each should:\n- Include the primary keyword naturally\n- Be compelling for an Australian construction/field service audience\n- Be unique from each other\n- Include ${new Date().getFullYear()} where natural\n\nReturn JSON array only: ["Title 1", "Title 2", "Title 3"]`
+      system: `You are an SEO content strategist for ${brand.name} (${brand.domain}). Generate 3 alternative article titles. Return ONLY a JSON array of 3 strings. No other text.`,
+      user: `Competitor article title: "${originalTitle}"\nCompetitor URL: ${url}\n\nGenerate 3 ${brand.name} article titles on this same topic. Each should:\n- Include the primary keyword naturally\n- Be compelling and unique from each other\n- Include ${new Date().getFullYear()} where natural\n\nReturn JSON array only: ["Title 1", "Title 2", "Title 3"]`
     });
     const match = result.text.match(/\[[\s\S]*?\]/);
     const titles = match ? JSON.parse(match[0]) : [originalTitle];
@@ -1969,10 +2091,13 @@ app.post('/api/snipe/titles', async (req, res) => {
 });
 
 // POST /api/snipe/generate — generate Brief+Draft+Meta for a sniped URL (SSE streaming)
-const SNIPE_SKILL_FILE = path.join(__dirname, 'snipe-skill.md');
 app.post('/api/snipe/generate', async (req, res) => {
   const { url, itemId, title: chosenTitle } = req.body || {};
   if (!url) return res.status(400).json({ error: 'url required' });
+
+  const brand = req.config.brand;
+  const skillFile = path.join(__dirname, req.config.snipeSkillFile);
+  const sitemapUrls = req.config.sitemap.urls;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1985,7 +2110,7 @@ app.post('/api/snipe/generate', async (req, res) => {
 
   // Load skill prompt
   let skillPrompt = '';
-  try { skillPrompt = fs.readFileSync(SNIPE_SKILL_FILE, 'utf8'); } catch(e) { skillPrompt = 'You are a content strategist for Kynection. Generate Brief, Draft, and Meta as JSON.'; }
+  try { skillPrompt = fs.readFileSync(skillFile, 'utf8'); } catch(e) { skillPrompt = `You are a content strategist for ${brand.name}. Generate Brief, Draft, and Meta as JSON.`; }
 
   // Scrape competitor page (8-second hard timeout)
   send({ type: 'progress', stage: 'scraping', message: 'Analysing competitor page...' });
@@ -1997,37 +2122,34 @@ app.post('/api/snipe/generate', async (req, res) => {
   let slug = '';
   try { slug = new URL(url).pathname.split('/').filter(Boolean).pop()?.replace(/[-_]/g,' ')?.replace(/\.[^.]+$/,'') || ''; } catch(e) {}
   const competitorTitle = page.h1 || page.title || slug || url;
-  const kynectionTitle = chosenTitle || competitorTitle;
+  const brandedTitle = chosenTitle || competitorTitle;
 
-  // Fetch Kynection sitemaps and find relevant internal links
-  const [postUrls, pageUrls] = await Promise.all([
-    fetchSitemapUrls('https://www.kynection.com.au/post-sitemap.xml'),
-    fetchSitemapUrls('https://www.kynection.com.au/page-sitemap.xml')
-  ]);
-  const allInternalUrls = [...postUrls, ...pageUrls];
+  // Fetch tenant sitemaps and find relevant internal links
+  const sitemapResults = await Promise.all(sitemapUrls.map(u => fetchSitemapUrls(u)));
+  const allInternalUrls = sitemapResults.flat();
   const scoredInternal = scoreUrlRelevance(allInternalUrls, competitorTitle);
-  // Take top 20 scored + always include key pages
-  const keyPages = allInternalUrls.filter(u => /\/(one-system|construction|transport|field-service|modules|features|pricing|about)\/?$/.test(u));
-  const topInternalCandidates = [...new Set([...scoredInternal.slice(0, 15).map(u => u.url), ...keyPages.slice(0, 5)])].slice(0, 20);
+  // Take top 20 scored — no tenant-specific "key pages" allow-list anymore;
+  // relevance scoring + the sitemap itself are enough.
+  const topInternalCandidates = scoredInternal.slice(0, 20).map(u => u.url);
 
   // Search for external authoritative sources
-  const externalSources = await searchExternalSourcesForSnipe(competitorTitle);
+  const externalSources = await searchExternalSourcesForSnipe(competitorTitle, brand.domain);
 
   send({ type: 'progress', stage: 'generating', message: 'Writing Brief, Draft & Meta...' });
 
   try {
     const internalLinksBlock = topInternalCandidates.length
       ? topInternalCandidates.map(u => `- ${u}`).join('\n')
-      : '- https://www.kynection.com.au/one-system\n- https://www.kynection.com.au/construction';
+      : `- https://${brand.domain}/`;
     const externalLinksBlock = externalSources.length
       ? externalSources.map(s => `- [${s.title}](${s.url})${s.snippet ? '\n  Snippet: ' + s.snippet.slice(0, 120) : ''}`).join('\n')
       : '(Use your knowledge to cite 5-8 authoritative sources: industry reports, government stats, research firms — with real URLs as Markdown hyperlinks)';
 
-    const userPrompt = `You are sniping this competitor article for Kynection:
+    const userPrompt = `You are sniping this competitor article for ${brand.name}:
 
 **Competitor URL:** ${url}
 **Competitor Title / Topic:** ${competitorTitle}
-**Kynection Article Title (use this as the H1):** ${kynectionTitle}
+**${brand.name} Article Title (use this as the H1):** ${brandedTitle}
 **Competitor Meta Description:** ${page.metaDesc || 'Not available'}
 
 **Competitor Article Content (first 6000 chars):**
@@ -2035,7 +2157,7 @@ ${page.text ? page.text.slice(0, 6000) : 'Could not scrape — use the URL slug 
 
 ---
 
-## Kynection Internal Links (choose 5–8 most relevant for this article):
+## ${brand.name} Internal Links (choose 5–8 most relevant for this article):
 ${internalLinksBlock}
 
 ## Authoritative External Sources to Cite (use 5–8 of these):
@@ -2044,9 +2166,9 @@ ${externalLinksBlock}
 ---
 
 CRITICAL REQUIREMENTS:
-1. **Real names only:** Identify the actual software products/tools reviewed in the competitor article from the scraped content above. Use their real names (e.g. "Procore", "Autodesk Construction Cloud", "simPRO") — never write "Competitor 1" or placeholder text. Every H3 heading must use the real product name.
+1. **Real names only:** Identify the actual software products/tools reviewed in the competitor article from the scraped content above. Use their real names — never write "Competitor 1" or placeholder text. Every H3 heading must use the real product name.
 2. **Word count:** The Draft section MUST contain at least 1,800 words. Write every section fully — do not truncate, abbreviate, or summarise early. Cover every competitor tool with a full H3 section.
-3. **Structure:** Mirror the competitor article exactly — same number of tool sections, same format per tool (Key Features + Best For + Tradeoffs & Risks). Kynection listed first.
+3. **Structure:** Mirror the competitor article exactly — same number of tool sections, same format per tool (Key Features + Best For + Tradeoffs & Risks). ${brand.name} listed first.
 4. **Links:** Embed 5–8 internal links AND 5–8 external citations as Markdown hyperlinks [anchor text](url) inline in the draft prose.
 
 Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or after the JSON.`;
@@ -2082,7 +2204,7 @@ Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or aft
         if (existing) {
           await db.updateContentItem(itemId, {
             snipe: { brief: result.brief, draft: result.draft, meta: result.meta, generatedAt: new Date().toISOString(), sniped: url },
-            title: existing.title || kynectionTitle,
+            title: existing.title || brandedTitle,
             cost:  costMeta
           });
         }
@@ -2260,9 +2382,13 @@ app.get('/api/content-items/:id/export', async (req, res) => {
 
 // Start
 // ============================================================
-// detectGSCSite() runs once per process. On Vercel each cold container will
-// fire it; locally it runs at boot below.
-detectGSCSite().catch(e => console.warn('GSC detect:', e.message));
+// detectGSCSite(tenant) runs once per process per tenant. On Vercel each
+// cold container will fire it; locally it runs at boot below. Lazy per-
+// tenant — the GSC middleware also triggers detection on first request if
+// boot hydration was skipped.
+for (const t of KNOWN_TENANTS) {
+  detectGSCSite(t).catch(e => console.warn(`GSC [${t}] detect:`, e.message));
+}
 
 // Only bind a port when this file is executed directly (i.e. `node server.js`
 // locally). When imported as a module (e.g. by `api/index.js` on Vercel) the

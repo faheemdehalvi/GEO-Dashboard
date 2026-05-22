@@ -45,8 +45,12 @@ const TENANT_DEFAULTS = {
     SEMRUSH_DOMAIN: 'intelligentresourcing.co',
     SITEMAP_URLS: 'https://intelligentresourcing.co/sitemap.xml',
     SNIPE_SKILL_FILE: 'snipe-skill-ir.md',
-    // IR omits semrush + mqls + deals — focus on web/GSC/YouTube + AEO + Content
-    ENABLED_SECTIONS: 'overview,web,gsc,youtube,aeo,prompts,content',
+    // IR omits semrush + mqls + deals + youtube (the IR YouTube brand
+    // account isn't properly attached to anthony@intelligentresourcing.co
+    // at the Google level — only at YouTube Studio Manager level — so
+    // OAuth can't grant access. Re-enable `youtube` here once the brand
+    // account ownership is sorted.
+    ENABLED_SECTIONS: 'overview,web,gsc,aeo,prompts,content',
     DASHBOARD_TITLE: 'Intelligent Resourcing Analytics'
   }
 };
