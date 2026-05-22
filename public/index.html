@@ -3587,8 +3587,22 @@ function filterAEOByDate(dateStr) {
 }
 
 async function renderAEO() {
-  // Load stored results
-  try { const r = await fetch('/api/aeo/results').then(x=>x.json()); _aeoResults = r || {}; } catch(e) {}
+  // Load stored results — log loudly on failure so we can diagnose
+  // the "data is in Supabase but doesn't render" class of bug.
+  try {
+    const r = await fetch('/api/aeo/results');
+    if (!r.ok) {
+      console.error('[renderAEO] /api/aeo/results returned', r.status, r.statusText);
+      const txt = await r.text().catch(() => '');
+      console.error('[renderAEO] response body:', txt.slice(0, 300));
+    } else {
+      const data = await r.json();
+      _aeoResults = data || {};
+      console.log('[renderAEO] loaded', Object.keys(_aeoResults).length, 'prompts from /api/aeo/results');
+    }
+  } catch(e) {
+    console.error('[renderAEO] fetch /api/aeo/results threw:', e);
+  }
   loadStreamHistory(); // fire-and-forget — renders into its own panel
 
   // Populate topic filter with all topics (base + custom)
