@@ -268,6 +268,63 @@ function memoryContentToDb(item, onlyProvided = false) {
 }
 
 // ============================================================
+// Competitors (tracked brands looked for in AEO responses + SEMrush)
+// ============================================================
+
+async function listCompetitors({ activeOnly = true } = {}) {
+  if (!USE_SUPABASE) return [];
+  let q = supabase.from('competitors').select('*').order('display_name', { ascending: true });
+  if (activeOnly) q = q.eq('is_active', true);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+
+async function addCompetitor({ domain, display_name, added_by }) {
+  if (!USE_SUPABASE) return null;
+  const cleanDomain = String(domain).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+  if (!cleanDomain || !cleanDomain.includes('.')) throw new Error('Invalid domain: ' + domain);
+  const cleanName = (display_name && display_name.trim()) || cleanDomain.split('.')[0].replace(/\b\w/g, c => c.toUpperCase());
+  const { data, error } = await supabase
+    .from('competitors')
+    .upsert({ domain: cleanDomain, display_name: cleanName, is_active: true, added_by: added_by || null }, { onConflict: 'domain' })
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function deleteCompetitor(id) {
+  if (!USE_SUPABASE) return false;
+  const { error, count } = await supabase.from('competitors').delete({ count: 'exact' }).eq('id', id);
+  if (error) throw error;
+  return (count || 0) > 0;
+}
+
+async function setCompetitorActive(id, isActive) {
+  if (!USE_SUPABASE) return null;
+  const { data, error } = await supabase.from('competitors').update({ is_active: !!isActive }).eq('id', id).select('*').maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// First-boot seed: if the competitors table is empty, populate it with the
+// legacy hardcoded list so nothing breaks for existing deploys.
+async function seedCompetitorsIfEmpty(legacyDomainMap) {
+  if (!USE_SUPABASE) return;
+  const { count, error } = await supabase.from('competitors').select('*', { count: 'exact', head: true });
+  if (error) { console.warn('competitors seed check failed:', error.message); return; }
+  if (count > 0) return;
+  const rows = Object.entries(legacyDomainMap).map(([domain, display_name]) => ({
+    domain, display_name, is_active: true, added_by: 'system-seed'
+  }));
+  if (!rows.length) return;
+  const { error: insErr } = await supabase.from('competitors').insert(rows);
+  if (insErr) console.warn('competitors seed insert failed:', insErr.message);
+  else console.log(`🌱 Seeded ${rows.length} default competitors`);
+}
+
+// ============================================================
 // Stream history
 // ============================================================
 
@@ -403,6 +460,11 @@ module.exports = {
   insertContentItems,
   updateContentItem,
   deleteContentItem,
+  listCompetitors,
+  addCompetitor,
+  deleteCompetitor,
+  setCompetitorActive,
+  seedCompetitorsIfEmpty,
   listStreamHistory,
   recordStreamHistory,
   updateStreamHistoryNote,

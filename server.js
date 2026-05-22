@@ -526,17 +526,48 @@ app.get('/api/semrush/backlinks', srCached('backlinks', async (req) => {
   return { data: { domain, backlinks: row['Backlinks'] || row['Bl'] || 0, organicKw: row['Organic Keywords'] || row['Or'] || 0, organicTraffic: row['Organic Traffic'] || row['Ot'] || 0 } };
 }));
 
-const TRACKED_COMPETITORS = [
-  'allotrac.io','aroflo.com','ascora.com.au','assetpanda.com','assetvision.com.au',
-  'assignar.com','cloudcon.com','deputy.com','donesafe.com','eroad.com',
-  'fergus.com','fieldinsight.com','fogwing.io','geotab.com','hammertech.com',
-  'hubfleet.com.au','getjobber.com','linxio.com','logmaster.com.au','mtdata.com.au',
-  'netstaraustralia.com.au','nexvia.com.au','procore.com','pronto.net','randmcnally.com',
-  'safetyculture.com','seeingmachines.com','servicetitan.com','servicem8.com',
-  'simprogroup.com','sitemate.com','smartrak.com','teletracnavman.com','tradifyhq.com.au',
-  'transportsystems.com.au','transvirtual.com','varicon.com.au','verizonconnect.com',
-  'workdiarymate.com.au','workbenchcentral.com'
-];
+// Default competitor list — used to seed the DB on first boot AND as fallback
+// when Supabase isn't configured. Once seeded, the dynamic in-memory cache
+// below (_competitors) is the source of truth.
+const DEFAULT_COMPETITORS = {
+  'allotrac.io':'Allotrac','aroflo.com':'AroFlo','ascora.com.au':'Ascora',
+  'assetpanda.com':'Asset Panda','assetvision.com.au':'AssetVision','assignar.com':'Assignar',
+  'cloudcon.com':'Cloudcon','deputy.com':'Deputy','donesafe.com':'Donesafe','eroad.com':'EROAD',
+  'fergus.com':'Fergus','fieldinsight.com':'FieldInsight','fogwing.io':'Fogwing',
+  'geotab.com':'Geotab','hammertech.com':'Hammertech','hubfleet.com.au':'HubFleet',
+  'getjobber.com':'Jobber','linxio.com':'Linxio','logmaster.com.au':'LogMaster',
+  'mtdata.com.au':'MTData','netstaraustralia.com.au':'Netstar','nexvia.com.au':'Nexvia',
+  'procore.com':'Procore','pronto.net':'Pronto','randmcnally.com':'Rand McNally',
+  'safetyculture.com':'SafetyCulture','seeingmachines.com':'Seeing Machines',
+  'servicetitan.com':'ServiceTitan','servicem8.com':'ServiceM8','simprogroup.com':'Simpro',
+  'sitemate.com':'Sitemate','smartrak.com':'Smartrak','teletracnavman.com':'Teletrac Navman',
+  'tradifyhq.com.au':'Tradify','transportsystems.com.au':'Transport Systems',
+  'transvirtual.com':'Transvirtual','varicon.com.au':'Varicon',
+  'verizonconnect.com':'Verizon Connect','workdiarymate.com.au':'Work Diary Mate',
+  'workbenchcentral.com':'Workbench'
+};
+
+// Dynamic in-memory cache, hydrated from Supabase on startup + refreshed on
+// every add/delete. Falls back to defaults if Supabase isn't configured.
+// Declared as `let` (not `const`) so refreshCompetitorsCache() can reassign.
+let _competitors = Object.entries(DEFAULT_COMPETITORS).map(([domain, display_name]) => ({ id: domain, domain, display_name, is_active: true }));
+let TRACKED_COMPETITORS = Object.keys(DEFAULT_COMPETITORS);
+let COMP_NAMES = { ...DEFAULT_COMPETITORS };
+
+async function refreshCompetitorsCache() {
+  try {
+    if (db.USE_SUPABASE) await db.seedCompetitorsIfEmpty(DEFAULT_COMPETITORS);
+    const rows = await db.listCompetitors({ activeOnly: false });
+    if (rows && rows.length) {
+      _competitors = rows;
+      const active = rows.filter(r => r.is_active);
+      TRACKED_COMPETITORS = active.map(r => r.domain);
+      COMP_NAMES = Object.fromEntries(active.map(r => [r.domain, r.display_name]));
+      console.log(`🏁 Competitors: ${active.length} active (of ${rows.length})`);
+    }
+  } catch (e) { console.warn('competitors hydrate failed:', e.message); }
+}
+refreshCompetitorsCache();
 
 app.get('/api/semrush/tracked-competitors', srCached('tracked-comp', async (req) => {
   const db = req.query.db || CONFIG.semrush.database;
@@ -1107,23 +1138,8 @@ function saveAeoResults() {
   try { fs.writeFileSync(process.env.AEO_RESULTS_FILE || path.join(__dirname, 'aeo-results.json'), JSON.stringify(_aeoResults)); } catch(e) {}
 }
 
-const COMP_NAMES = {
-  'allotrac.io':'Allotrac','aroflo.com':'AroFlo','ascora.com.au':'Ascora',
-  'assetpanda.com':'Asset Panda','assetvision.com.au':'AssetVision','assignar.com':'Assignar',
-  'cloudcon.com':'Cloudcon','deputy.com':'Deputy','donesafe.com':'Donesafe','eroad.com':'EROAD',
-  'fergus.com':'Fergus','fieldinsight.com':'FieldInsight','fogwing.io':'Fogwing',
-  'geotab.com':'Geotab','hammertech.com':'Hammertech','hubfleet.com.au':'HubFleet',
-  'getjobber.com':'Jobber','linxio.com':'Linxio','logmaster.com.au':'LogMaster',
-  'mtdata.com.au':'MTData','netstaraustralia.com.au':'Netstar','nexvia.com.au':'Nexvia',
-  'procore.com':'Procore','pronto.net':'Pronto','randmcnally.com':'Rand McNally',
-  'safetyculture.com':'SafetyCulture','seeingmachines.com':'Seeing Machines',
-  'servicetitan.com':'ServiceTitan','servicem8.com':'ServiceM8','simprogroup.com':'Simpro',
-  'sitemate.com':'Sitemate','smartrak.com':'Smartrak','teletracnavman.com':'Teletrac Navman',
-  'tradifyhq.com.au':'Tradify','transportsystems.com.au':'Transport Systems',
-  'transvirtual.com':'Transvirtual','varicon.com.au':'Varicon',
-  'verizonconnect.com':'Verizon Connect','workdiarymate.com.au':'Work Diary Mate',
-  'workbenchcentral.com':'Workbench'
-};
+// COMP_NAMES is now declared as `let` near the top of the file alongside
+// the dynamic competitors cache — see refreshCompetitorsCache().
 
 function checkMentions(text) {
   const lower = text.toLowerCase();
@@ -1175,6 +1191,60 @@ function checkMentions(text) {
 }
 
 app.get('/api/aeo/results', (req, res) => res.json(_aeoResults));
+
+// ── Competitors ───────────────────────────────────────────────
+app.get('/api/aeo/competitors', async (req, res) => {
+  try { res.json(await db.listCompetitors({ activeOnly: false })); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Accepts either { domain, display_name } for one, or { bulk: "domain,name\n..." }
+// for many at once. Returns the list of inserted rows.
+app.post('/api/aeo/competitors', async (req, res) => {
+  const { domain, display_name, bulk } = req.body || {};
+  const userEmail = req.user?.email || null;
+  try {
+    const out = [];
+    if (bulk && typeof bulk === 'string') {
+      for (const raw of bulk.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line) continue;
+        const [d, ...nameParts] = line.split(/[,\t]/).map(s => s.trim());
+        if (!d) continue;
+        try {
+          const row = await db.addCompetitor({ domain: d, display_name: nameParts.join(' ') || null, added_by: userEmail });
+          if (row) out.push(row);
+        } catch(e) { /* skip invalid line, keep going */ }
+      }
+    } else if (domain) {
+      const row = await db.addCompetitor({ domain, display_name, added_by: userEmail });
+      if (row) out.push(row);
+    } else {
+      return res.status(400).json({ error: 'Provide `domain` (and optional `display_name`), or `bulk` text' });
+    }
+    await refreshCompetitorsCache();
+    res.json({ added: out.length, rows: out });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/aeo/competitors/:id', async (req, res) => {
+  try {
+    const ok = await db.deleteCompetitor(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Not found' });
+    await refreshCompetitorsCache();
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/aeo/competitors/:id', async (req, res) => {
+  const { is_active } = req.body || {};
+  try {
+    const row = await db.setCompetitorActive(req.params.id, !!is_active);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    await refreshCompetitorsCache();
+    res.json(row);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── Stream history ────────────────────────────────────────────
 app.get('/api/aeo/stream-history', async (req, res) => {

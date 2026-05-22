@@ -60,6 +60,24 @@ create table if not exists content_items (
 create index if not exists content_items_created_idx on content_items(created_at desc);
 
 -- ============================================================
+-- Tracked competitors. Used by:
+--   • AEO mention-detection (checkMentions) — looks for these domains/names
+--     in LLM responses to score competitor presence
+--   • SEMrush /api/semrush/tracked-competitors — fetches metrics for each
+--   • Frontend competitor labels + charts (SOV, heatmap, etc.)
+-- Toggle is_active to pause a competitor without losing historical data.
+-- ============================================================
+create table if not exists competitors (
+  id           uuid primary key default gen_random_uuid(),
+  domain       text not null unique,
+  display_name text not null,
+  is_active    boolean not null default true,
+  added_at     timestamptz not null default now(),
+  added_by     text
+);
+create index if not exists competitors_is_active_idx on competitors(is_active);
+
+-- ============================================================
 -- Stream history (one row per completed stream run — manual or import).
 -- Lets the dashboard show when streams happened and what was in scope so
 -- the user can pick period-comparison windows that actually contain data.
