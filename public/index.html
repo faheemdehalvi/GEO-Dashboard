@@ -1301,10 +1301,14 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
     <!-- CSV Tab -->
     <div id="ap-pane-csv" style="display:none">
       <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-        Paste CSV with columns: <strong>prompt, topic, tag</strong> (header row optional)
+        Upload a .csv file OR paste CSV content with columns: <strong>prompt, topic, tag</strong> (header row optional). Fields with commas must be wrapped in "double quotes".
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+        <input type="file" id="ap-csv-file" accept=".csv,text/csv,text/plain" onchange="_csvFileChosen(event)" style="font-size:12px">
+        <span id="ap-csv-file-status" style="font-size:11px;color:var(--muted)"></span>
       </div>
       <textarea class="ft fta" id="ap-csv-text" style="width:100%;min-height:160px;resize:vertical;font-size:11.5px;font-family:monospace" placeholder="What is field service management software?,Field Service,Non-Branded&#10;Best job management app for trades in Australia,Job Management,Non-Branded"></textarea>
-      <div style="font-size:11px;color:var(--muted);margin-top:6px" id="ap-csv-count">Paste CSV above to preview</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px" id="ap-csv-count">Paste CSV above or upload a file to preview</div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
         <button class="btn btn-ghost" onclick="closeAddPromptsModal()">Cancel</button>
         <button class="btn btn-primary" onclick="importCSVPrompts()">Import CSV</button>
@@ -5368,10 +5372,36 @@ async function runStreamNow() {
 // ADD PROMPTS MODAL
 // ══════════════════════════════════════════════════════════════
 
-// Get all prompts: base CSV + custom from localStorage
+// Per-tenant custom-prompts localStorage key. Each tenant has its own
+// custom set; the original 'kyn_aeo_custom_prompts' is honoured for
+// backward compat when tenant === 'kyn'.
+function _customPromptsKey() {
+  return (_tenant || 'kyn') + '_aeo_custom_prompts';
+}
+
+// One-time forced wipe of IR's custom prompts — clears the garbled batch
+// that was imported before the parser/encoding fix. Runs ONCE per browser
+// (guarded by a flag in localStorage). After this, re-import via the file
+// picker on the Import CSV tab.
+(function _oneTimeWipeIRCustomPrompts() {
+  try {
+    const FLAG = 'ir_aeo_custom_prompts_wipe_v1';
+    if (localStorage.getItem(FLAG)) return; // already wiped on this browser
+    const had = localStorage.getItem('ir_aeo_custom_prompts');
+    localStorage.removeItem('ir_aeo_custom_prompts');
+    localStorage.setItem(FLAG, new Date().toISOString());
+    if (had) console.log('🧹 One-time wipe: cleared ir_aeo_custom_prompts (re-import via Add Prompts → Import CSV).');
+  } catch(e) {}
+})();
+
+// Get all prompts: base CSV + custom from localStorage.
+// The hardcoded AEO_PROMPTS (237 prompts) is Kynection-specific so it
+// only loads for the kyn tenant. Other tenants start with their own
+// custom list — paste CSV via the Add Prompts modal to populate.
 function getAllPrompts() {
-  const custom = JSON.parse(localStorage.getItem('kyn_aeo_custom_prompts') || '[]');
-  return [...AEO_PROMPTS, ...custom];
+  const custom = JSON.parse(localStorage.getItem(_customPromptsKey()) || '[]');
+  const base = (_tenant === 'kyn') ? AEO_PROMPTS : [];
+  return [...base, ...custom];
 }
 
 // Get all unique topics (base + custom)
@@ -5589,11 +5619,12 @@ function addSelectedPrompts() {
 
   if (!newPrompts.length) { alert('No prompts selected.'); return; }
 
-  // Save to localStorage
-  const existing = JSON.parse(localStorage.getItem('kyn_aeo_custom_prompts') || '[]');
-  const baseCount = AEO_PROMPTS.length + existing.length;
+  // Save to per-tenant localStorage key
+  const key = _customPromptsKey();
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  const baseCount = (_tenant === 'kyn' ? AEO_PROMPTS.length : 0) + existing.length;
   const withIds = newPrompts.map((p, i) => ({ ...p, id: 'aeo_custom_' + (baseCount + i) + '_' + Date.now() }));
-  localStorage.setItem('kyn_aeo_custom_prompts', JSON.stringify([...existing, ...withIds]));
+  localStorage.setItem(key, JSON.stringify([...existing, ...withIds]));
 
   closeAddPromptsModal();
   renderAEOKPIs();
@@ -5611,27 +5642,76 @@ function addSelectedPrompts() {
   setTimeout(() => toast.remove(), 3000);
 }
 
+// Proper CSV line parser — respects "double-quoted" fields with commas inside,
+// handles escaped quotes ("" → "), strips BOM, tolerates CRLF.
+function _parseCSVLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else { inQuotes = false; }
+      } else { cur += ch; }
+    } else {
+      if (ch === ',') { out.push(cur); cur = ''; }
+      else if (ch === '"' && cur === '') { inQuotes = true; }
+      else { cur += ch; }
+    }
+  }
+  out.push(cur);
+  return out.map(c => c.trim());
+}
+
+// File picker handler — reads .csv file as UTF-8 and drops contents into the textarea
+function _csvFileChosen(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    document.getElementById('ap-csv-text').value = reader.result || '';
+    document.getElementById('ap-csv-file-status').textContent = `Loaded: ${file.name} (${(file.size/1024).toFixed(1)}KB)`;
+    // Trigger the preview count update
+    const ta = document.getElementById('ap-csv-text');
+    ta.dispatchEvent(new Event('input'));
+  };
+  reader.onerror = () => { alert('Could not read file: ' + reader.error); };
+  reader.readAsText(file, 'utf-8');
+}
+
 function importCSVPrompts() {
-  const raw = document.getElementById('ap-csv-text').value.trim();
-  if (!raw) { alert('Please paste CSV content first.'); return; }
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  let raw = document.getElementById('ap-csv-text').value.trim();
+  if (!raw) { alert('Please paste CSV content or upload a file first.'); return; }
+  // Strip UTF-8 BOM if present
+  if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+  // Tolerate CRLF and CR line endings
+  const lines = raw.split(/\r\n|\r|\n/).map(l => l.trim()).filter(Boolean);
   const newPrompts = [];
-  for (const line of lines) {
-    // Split on comma but respect quoted fields
-    const cols = line.split(',').map(c => c.replace(/^"|"$/g, '').trim());
-    if (cols.length < 1) continue;
-    const text = cols[0];
-    if (!text || text.toLowerCase() === 'prompt') continue; // skip header
-    const topic = cols[1] || 'General';
-    const tag = cols[2] || 'Non-Branded';
+  const errors = [];
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const cols = _parseCSVLine(line);
+    const text = (cols[0] || '').trim();
+    if (!text) continue;
+    if (text.toLowerCase() === 'prompt') continue; // skip header
+    const topic = (cols[1] || 'General').trim();
+    let tag = (cols[2] || 'Non-Branded').trim();
+    // Normalise tag — accept Branded/Non-Branded in any casing
+    if (/^non[-\s]?branded$/i.test(tag)) tag = 'Non-Branded';
+    else if (/^branded$/i.test(tag)) tag = 'Branded';
+    else { errors.push(`Row ${li+1}: unrecognised tag "${tag}" — defaulting to Non-Branded`); tag = 'Non-Branded'; }
     newPrompts.push({ text, topic, tag });
   }
   if (!newPrompts.length) { alert('No valid prompts found in CSV.'); return; }
+  if (errors.length) console.warn('CSV import warnings:\n' + errors.join('\n'));
 
-  const existing = JSON.parse(localStorage.getItem('kyn_aeo_custom_prompts') || '[]');
-  const baseCount = AEO_PROMPTS.length + existing.length;
+  const key = _customPromptsKey();
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  const baseCount = (_tenant === 'kyn' ? AEO_PROMPTS.length : 0) + existing.length;
   const withIds = newPrompts.map((p, i) => ({ ...p, id: 'aeo_custom_' + (baseCount + i) + '_' + Date.now() }));
-  localStorage.setItem('kyn_aeo_custom_prompts', JSON.stringify([...existing, ...withIds]));
+  localStorage.setItem(key, JSON.stringify([...existing, ...withIds]));
 
   closeAddPromptsModal();
   renderAEOKPIs();

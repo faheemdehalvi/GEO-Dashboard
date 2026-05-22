@@ -1616,14 +1616,47 @@ app.post('/api/aeo/stream', async (req, res) => {
   const callPerplexity = async (prompt) => {
     const key = process.env.PERPLEXITY_API_KEY;
     if (!key) throw new Error('PERPLEXITY_API_KEY not configured');
+    // Australian context: ask Perplexity to prefer AU sources, matching the
+    // behaviour of the other callers (Gemini + AIOverview both bias AU).
     const r = await fetch('https://api.perplexity.ai/chat/completions', {
       method:'POST',
       headers:{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'},
-      body: JSON.stringify({ model:'sonar', messages:[{role:'user',content:prompt}], max_tokens:1024 })
+      body: JSON.stringify({
+        model: 'sonar',
+        messages: [
+          { role: 'system', content: 'You are searching from Australia. Prioritise Australian sources, websites and search results when relevant.' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 1024,
+        return_citations: true,
+        return_related_questions: false
+      })
     });
     const d = await r.json();
     if (d.error) throw new Error(JSON.stringify(d.error));
-    return d.choices?.[0]?.message?.content || '';
+    const text = d.choices?.[0]?.message?.content || '';
+
+    // Extract sources. Perplexity returns citations in one of two shapes
+    // depending on API version:
+    //   1. search_results: [{ title, url, date }]    (newer Sonar)
+    //   2. citations: ["https://...", "https://..."] (older format, flat URLs)
+    // Normalise to the { index, title, uri, domain } shape used by the
+    // other callers so the UI shows them in the Sources column.
+    let sources = [];
+    if (Array.isArray(d.search_results) && d.search_results.length) {
+      sources = d.search_results.map((s, i) => {
+        let domain = '';
+        try { domain = new URL(s.url).hostname.replace(/^www\./, ''); } catch(e) {}
+        return { index: i + 1, title: s.title || `Source ${i+1}`, uri: s.url, domain };
+      });
+    } else if (Array.isArray(d.citations) && d.citations.length) {
+      sources = d.citations.map((url, i) => {
+        let domain = '';
+        try { domain = new URL(url).hostname.replace(/^www\./, ''); } catch(e) {}
+        return { index: i + 1, title: domain || `Source ${i+1}`, uri: url, domain };
+      });
+    }
+    return { text, sourceUrls: sources };
   };
 
   const callGemini = async (prompt) => {
