@@ -890,11 +890,12 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
             </select>
             <select class="sel" id="aeo-filter-tag" onchange="renderAEOTable()" style="font-size:11px;height:28px">
               <option value="">All Tags</option>
-              <option value="Non-branded">Non-branded</option>
+              <option value="Non-Branded">Non-Branded</option>
               <option value="Branded">Branded</option>
             </select>
             <input class="sel" id="aeo-search" placeholder="Search prompts…" oninput="renderAEOTable()" style="font-size:11px;height:28px;padding:0 8px;width:160px">
             <button class="btn btn-ghost btn-sm" onclick="showAddPromptsModal()" style="white-space:nowrap">+ Add Prompts</button>
+            <button class="btn btn-ghost btn-sm" onclick="showExportPromptsModal()" style="white-space:nowrap">⬇ Export CSV</button>
             <button class="btn btn-primary btn-sm" onclick="showStreamModal()" style="white-space:nowrap">▶ Stream Data</button>
           </div>
         </div>
@@ -1312,6 +1313,41 @@ select.sel{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
         <button class="btn btn-ghost" onclick="closeAddPromptsModal()">Cancel</button>
         <button class="btn btn-primary" onclick="importCSVPrompts()">Import CSV</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- EXPORT PROMPTS MODAL -->
+<div id="modal-export-prompts" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeExportPromptsModal()">
+  <div class="modal" style="max-width:560px;padding:28px;max-height:90vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h3 style="margin:0;font-size:16px">Export Prompts to CSV</h3>
+      <button onclick="closeExportPromptsModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted)">×</button>
+    </div>
+    <p id="export-prompts-sub" style="font-size:12.5px;color:var(--muted);margin:0 0 16px">Pick which columns to include in the export.</p>
+
+    <!-- Scope toggle -->
+    <div style="background:var(--bg2);border-radius:8px;padding:12px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+      <input type="checkbox" id="export-respect-filters" checked onchange="_updateExportCount()" style="cursor:pointer">
+      <label for="export-respect-filters" style="font-size:12.5px;cursor:pointer;flex:1">
+        <strong>Respect current filters</strong>
+        <span style="color:var(--muted);display:block;font-size:11px;margin-top:1px">Uncheck to export every prompt regardless of topic/tag/search/mention filters.</span>
+      </label>
+    </div>
+
+    <!-- Column checkboxes -->
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Columns</div>
+    <div id="export-columns" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;max-height:340px;overflow-y:auto;padding:4px 2px 8px"></div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <div style="font-size:11.5px;color:var(--muted)">
+        <button class="btn btn-ghost btn-sm" onclick="_setAllExportColumns(true)" style="padding:2px 8px;font-size:11px">Select all</button>
+        <button class="btn btn-ghost btn-sm" onclick="_setAllExportColumns(false)" style="padding:2px 8px;font-size:11px">Clear</button>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="closeExportPromptsModal()">Cancel</button>
+        <button class="btn btn-primary" id="export-csv-btn" onclick="runExportCSV()">Download CSV</button>
       </div>
     </div>
   </div>
@@ -4680,7 +4716,11 @@ function renderAEOTable() {
   const allPrompts = getAllPrompts();
   let prompts = allPrompts.filter(p => {
     if (topicFilter && p.topic !== topicFilter) return false;
-    if (tagFilter   && p.tag !== tagFilter) return false;
+    // Tag comparison is case-insensitive — Kynection's hardcoded data uses
+    // "Non-branded" (lowercase b) while IR's CSV-imported data uses
+    // "Non-Branded" (capital B). Without this normalisation the filter
+    // matches one casing only and silently drops every prompt of the other.
+    if (tagFilter   && (p.tag || '').toLowerCase() !== tagFilter.toLowerCase()) return false;
     if (search && !p.text.toLowerCase().includes(search) && !p.topic.toLowerCase().includes(search)) return false;
     // mention filter
     const m = promptMetrics(p.id);
@@ -5728,6 +5768,166 @@ function _csvFileChosen(ev) {
   };
   reader.onerror = () => { alert('Could not read file: ' + reader.error); };
   reader.readAsText(file, 'utf-8');
+}
+
+// ══════════════════════════════════════════════════════════════
+// EXPORT PROMPTS TO CSV
+// ══════════════════════════════════════════════════════════════
+// Column definitions. `compute(p, m, runs)` returns the cell value.
+// `id` is used as the localStorage key for last-selected columns.
+const EXPORT_COLUMNS = [
+  { id: 'prompt',      label: 'Prompt',                  locked: true,  on: true,  compute: (p) => p.text || '' },
+  { id: 'topic',       label: 'Topic',                                 on: true,  compute: (p) => p.topic || '' },
+  { id: 'tag',         label: 'Tag',                                   on: true,
+    // Normalise to canonical casing in the export so the CSV is consistent.
+    compute: (p) => /^non[-\s]?branded$/i.test(p.tag || '') ? 'Non-Branded' : (/^branded$/i.test(p.tag || '') ? 'Branded' : (p.tag || '')) },
+  { id: 'mentionPct',   label: 'Mention %',                            on: true,  compute: (p, m) => m ? m.mentionPct.toFixed(1) : '' },
+  { id: 'deltaMention', label: 'Δ Mention (vs prev)',                  on: true,  compute: (p, m) => (m && m.deltaMention != null) ? m.deltaMention.toFixed(1) : '' },
+  { id: 'mentionGap',   label: 'Mention Gap',                          on: true,  compute: (p, m) => m ? m.mentionGap.toFixed(1) : '' },
+  { id: 'citationPct',  label: 'Citation %',                           on: true,
+    compute: (p, m, runs) => runs.length ? ((runs.filter(r => r.cited).length / runs.length) * 100).toFixed(1) : '' },
+  { id: 'attributedPct',label: 'Attributed Citation %',                on: true,
+    compute: (p, m, runs) => runs.length ? ((runs.filter(r => r.attributedCitation).length / runs.length) * 100).toFixed(1) : '' },
+  { id: 'avgRank',      label: 'Avg Position',                         on: true,  compute: (p, m) => (m && m.avgRank != null) ? m.avgRank.toFixed(1) : '' },
+  { id: 'runs',         label: 'Runs',                                 on: true,  compute: (p, m) => m ? m.n : 0 },
+  { id: 'lastRun',      label: 'Last Run Date',                        on: true,
+    compute: (p, m, runs) => { const ds = runs.map(r => r.date).filter(Boolean).sort(); return ds.length ? ds[ds.length-1] : ''; } },
+  { id: 'topCompetitors', label: 'Top Competitors Mentioned',          on: true,
+    compute: (p, m, runs) => {
+      const counts = {};
+      runs.forEach(r => (r.competitorsMentioned || []).forEach(d => { counts[d] = (counts[d] || 0) + 1; }));
+      return Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0, 5).map(([d,c]) => `${d} (${c})`).join('; ');
+    } },
+  { id: 'topSources',   label: 'Top Citation Sources',                 on: true,
+    compute: (p, m, runs) => {
+      const counts = {};
+      runs.forEach(r => (r.sourceUrls || []).forEach(s => {
+        const d = (typeof s === 'string') ? (() => { try { return new URL(s).hostname.replace(/^www\./,''); } catch(e) { return ''; } })() : (s.domain || '');
+        if (d) counts[d] = (counts[d] || 0) + 1;
+      }));
+      return Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0, 5).map(([d,c]) => `${d} (${c})`).join('; ');
+    } },
+  { id: 'models',       label: 'Models Run',                           on: true,
+    compute: (p, m, runs) => [...new Set(runs.map(r => r.model).filter(Boolean))].sort().join('; ') },
+];
+
+function showExportPromptsModal() {
+  // Render checkboxes
+  const stored = JSON.parse(localStorage.getItem('export_columns_selected') || 'null');
+  const wrap = document.getElementById('export-columns');
+  wrap.innerHTML = EXPORT_COLUMNS.map(c => {
+    const checked = c.locked || (stored ? stored.includes(c.id) : c.on);
+    return `<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:${c.locked?'not-allowed':'pointer'};padding:4px 0;${c.locked?'opacity:.6':''}">
+      <input type="checkbox" data-col-id="${c.id}" ${checked?'checked':''} ${c.locked?'disabled':''} style="cursor:inherit;accent-color:#5B6CF9">
+      <span>${c.label}${c.locked?' <span style="font-size:10px;color:var(--muted)">(required)</span>':''}</span>
+    </label>`;
+  }).join('');
+  document.getElementById('modal-export-prompts').style.display = 'flex';
+  _updateExportCount();
+}
+
+function closeExportPromptsModal() {
+  document.getElementById('modal-export-prompts').style.display = 'none';
+}
+
+function _setAllExportColumns(checked) {
+  document.querySelectorAll('#export-columns input[data-col-id]').forEach(cb => {
+    if (!cb.disabled) cb.checked = checked;
+  });
+}
+
+function _updateExportCount() {
+  // Update the modal subtitle to show how many prompts will be exported
+  // based on the "respect filters" toggle.
+  const respect = document.getElementById('export-respect-filters')?.checked;
+  const all = getAllPrompts();
+  const sub = document.getElementById('export-prompts-sub');
+  if (!sub) return;
+  if (!respect) {
+    sub.textContent = `Will export all ${all.length} prompts for ${_brandName()}.`;
+    return;
+  }
+  // Mirror renderAEOTable's filter logic
+  const topicFilter = document.getElementById('aeo-filter-topic')?.value || '';
+  const tagFilter   = document.getElementById('aeo-filter-tag')?.value || '';
+  const search      = (document.getElementById('aeo-search')?.value || '').toLowerCase();
+  const filtered = all.filter(p => {
+    if (topicFilter && p.topic !== topicFilter) return false;
+    if (tagFilter   && (p.tag || '').toLowerCase() !== tagFilter.toLowerCase()) return false;
+    if (search && !p.text.toLowerCase().includes(search) && !p.topic.toLowerCase().includes(search)) return false;
+    const m = promptMetrics(p.id);
+    if (_mentionFilter === 'mentioned' && (!m || m.mentionPct === 0)) return false;
+    if (_mentionFilter === 'cited'     && (!m || m.citationPct === 0)) return false;
+    if (_mentionFilter === 'absent'    && m && m.mentionPct > 0) return false;
+    return true;
+  });
+  sub.textContent = `Will export ${filtered.length} of ${all.length} prompts (current filters applied).`;
+}
+
+// Proper CSV escaping — wraps fields containing comma, newline, or quote in
+// "double quotes" and doubles inner quotes per RFC 4180.
+function _csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function runExportCSV() {
+  // Collect chosen columns in their original order
+  const chosenIds = [];
+  document.querySelectorAll('#export-columns input[data-col-id]').forEach(cb => {
+    if (cb.checked) chosenIds.push(cb.dataset.colId);
+  });
+  if (!chosenIds.length) { alert('Select at least one column.'); return; }
+  // Persist selection so next export remembers
+  localStorage.setItem('export_columns_selected', JSON.stringify(chosenIds));
+
+  const cols = EXPORT_COLUMNS.filter(c => chosenIds.includes(c.id));
+
+  // Determine which prompts to export
+  const respect = document.getElementById('export-respect-filters').checked;
+  let prompts = getAllPrompts();
+  if (respect) {
+    const topicFilter = document.getElementById('aeo-filter-topic')?.value || '';
+    const tagFilter   = document.getElementById('aeo-filter-tag')?.value || '';
+    const search      = (document.getElementById('aeo-search')?.value || '').toLowerCase();
+    prompts = prompts.filter(p => {
+      if (topicFilter && p.topic !== topicFilter) return false;
+      if (tagFilter   && (p.tag || '').toLowerCase() !== tagFilter.toLowerCase()) return false;
+      if (search && !p.text.toLowerCase().includes(search) && !p.topic.toLowerCase().includes(search)) return false;
+      const m = promptMetrics(p.id);
+      if (_mentionFilter === 'mentioned' && (!m || m.mentionPct === 0)) return false;
+      if (_mentionFilter === 'cited'     && (!m || m.citationPct === 0)) return false;
+      if (_mentionFilter === 'absent'    && m && m.mentionPct > 0) return false;
+      return true;
+    });
+  }
+  if (!prompts.length) { alert('No prompts to export with the current filters.'); return; }
+
+  // Build rows
+  const lines = [];
+  lines.push(cols.map(c => _csvCell(c.label)).join(','));
+  for (const p of prompts) {
+    const m = promptMetrics(p.id);
+    const runs = (_aeoResults[p.id]?.runs) || [];
+    const row = cols.map(c => _csvCell(c.compute(p, m, runs)));
+    lines.push(row.join(','));
+  }
+  const csv = lines.join('\r\n');
+
+  // Trigger download. Prepend BOM so Excel auto-detects UTF-8.
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const today = new Date().toISOString().slice(0, 10);
+  const tenant = _tenant || 'kyn';
+  const fname = `prompts-export-${tenant}-${today}.csv`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = fname;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+
+  closeExportPromptsModal();
 }
 
 function importCSVPrompts() {
