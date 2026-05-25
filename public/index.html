@@ -6612,6 +6612,77 @@ async function revampSnipeGenerate() {
   }
 }
 
+// Re-fires the appropriate Revamp endpoint against the CURRENT drawer
+// row (instead of creating a new content_item). The backend detects
+// existing snipe.brief as cached feedback and skips straight to draft+meta.
+async function continueRevampGeneration() {
+  const rowId = _snipeDrawerItemId;
+  if (!rowId) return;
+  const item = _contentItems.find(i => i.id === rowId);
+  if (!item || !item.snipe?.brief) return;
+  const meta = item.snipe || {};
+  const articleType = meta.articleType || 'general';
+  const competitor  = meta.competitor || '';
+  const mode        = parseInt(meta.mode) === 2 ? 2 : 1;
+  // Snipe-revamp uses parentSnipeId. URL-based revamp uses item.url.
+  const parentSnipeId = meta.parentSnipeId;
+  const endpoint = parentSnipeId ? '/api/snipe/revamp' : '/api/revamp/generate';
+  const body = parentSnipeId
+    ? { snipeItemId: parentSnipeId, newItemId: rowId, articleType, competitor, mode }
+    : { url: item.url, itemId: rowId, articleType, competitor, mode };
+
+  closeSnipeDrawer();
+  // Reset the row's progress UI to show generation in progress
+  await loadContentItems();
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === 'stage') {
+            const stageMap = { feedback: 'brief', draft: 'draft', meta: 'meta' };
+            _updateSnipeRowProgress(rowId, stageMap[evt.stage] || evt.stage);
+          } else if (evt.type === 'complete') {
+            try {
+              await fetch(`/api/content-items/${rowId}`, {
+                method:'PATCH',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({
+                  snipeType: 'revamp',
+                  snipe: { ...meta, brief: evt.feedback || meta.brief || '', draft: evt.draft || '', meta: evt.meta || '' },
+                  cost: { costAUD: evt.costAUD, model: evt.model }
+                })
+              });
+            } catch(e) {}
+            _updateSnipeRowProgress(rowId, 'meta');
+            if (evt.costAUD) _showCostToast(evt.costAUD, evt.model);
+            await loadContentItems();
+          } else if (evt.type === 'error') {
+            console.error('Continue Revamp error:', evt.error);
+          }
+        } catch(e2) {}
+      }
+    }
+  } catch(e) {
+    console.error('Continue Revamp failed:', e.message);
+  }
+}
+
 function closeSnipeModal() {
   document.getElementById('modal-snipe').style.display = 'none';
 }
@@ -6696,6 +6767,17 @@ function openSnipeDrawer(itemId) {
     const hasRevamp = (cfg?.contentFeatures || []).includes('revamp');
     const isSnipe = item.snipeType === 'snipe' && item.snipe?.draft;
     revampBtn.style.display = (hasRevamp && isSnipe) ? 'flex' : 'none';
+  }
+  // Show "Continue Generation" button when a revamp row has feedback
+  // (Pass 1 succeeded) but no draft (Pass 2 failed or hasn't run).
+  // Clicking re-fires the Revamp endpoint — backend sees cached
+  // feedback and skips straight to Pass 2.
+  const continueBtn = document.getElementById('snipe-drawer-continue-btn');
+  if (continueBtn) {
+    const isRevamp = item.snipeType === 'revamp';
+    const hasFeedback = !!(item.snipe?.brief && item.snipe.brief.length > 200);
+    const noDraft = !(item.snipe?.draft);
+    continueBtn.style.display = (isRevamp && hasFeedback && noDraft) ? 'flex' : 'none';
   }
   // Show cost if available
   const costEl = document.getElementById('snipe-drawer-cost');
@@ -7049,6 +7131,9 @@ function _mdToHtml(md) {
     <span id="snipe-drawer-cost" style="font-size:11px;color:#94A3B8;background:#F8FAFC;border:1px solid #E2E8F0;padding:3px 8px;border-radius:10px;white-space:nowrap"></span>
     <button id="snipe-drawer-revamp-btn" onclick="openRevampSnipeModal()" style="display:none;background:#fff;color:#065F46;border:1.5px solid #10B981;border-radius:8px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;align-items:center;gap:6px;flex-shrink:0">
       ↻ Revamp this Snipe
+    </button>
+    <button id="snipe-drawer-continue-btn" onclick="continueRevampGeneration()" style="display:none;background:#10B981;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;align-items:center;gap:6px;flex-shrink:0" title="Feedback is cached. Continue with draft + meta generation.">
+      ▶ Continue Generation
     </button>
     <button onclick="exportSnipeDraft()" style="background:#fff;color:#0F172A;border:1.5px solid #E2E8F0;border-radius:8px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;flex-shrink:0">
       ↓ Export Draft

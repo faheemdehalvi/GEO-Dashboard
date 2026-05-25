@@ -6,7 +6,7 @@
       "use": "@vercel/node",
       "config": {
         "includeFiles": "{server.js,db.js,auth.js,tenant.js,snipe-skill.md,snipe-skill-ir.md,revamp-skill-ir.md,revamp-skill-ir-app.md}",
-        "maxDuration": 300
+        "maxDuration": 600
       }
     },
     { "src": "public/**", "use": "@vercel/static" }

@@ -2730,11 +2730,7 @@ ${externalCandidatesBlock}
 
 ## Required Output
 
-Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
-
-- **feedback**: full Phase 1-3 review following the FEEDBACK section template in your system prompt. Include the citation verification table verbatim. For Mode 2, use the compact bullet list format the app skill defines (NOT verbatim Original/Revised quotations).
-- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake all revisions inline)'} per your system prompt's mandatory checks. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
-- **meta**: meta description (≤160 chars, CTR-optimised) + internal links used + external citations used + any Unverified sources dropped.
+[OUTPUT_INSTRUCTIONS_HERE]
 
 CRITICAL:
 1. Sources with status not equal to \`live\` are DROPPED from the draft.
@@ -2743,30 +2739,105 @@ CRITICAL:
 4. No em-dashes / hedging / no-fly vocabulary / G2 links / ™ symbols anywhere.
 5. Mode ${modeNum} mandatory checks from your system prompt apply.`;
 
+  // ── 2-pass sequential generation with mid-flow caching ────────
+  // Pass 1: feedback → save to row immediately (acts as recovery cache).
+  // Pass 2: draft+meta using the feedback as context → save.
+  // If Pass 2 fails, the row has feedback. Retry skips Pass 1.
+  let cachedFeedback = '';
+  if (itemId) {
+    try {
+      const existing = await db.getContentItem(itemId);
+      if (existing?.snipe?.brief && existing.snipe.brief.length > 200 && !existing.snipe?.draft) {
+        cachedFeedback = existing.snipe.brief;
+        send({ type: 'progress', stage: 'cache-hit', message: 'Using cached feedback from previous attempt — skipping to draft generation...' });
+      }
+    } catch(e) { /* fresh row, no cache */ }
+  }
+
   const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
-  let aiResult;
+  let feedbackText = cachedFeedback;
+  let pass1Tokens = { input: 0, output: 0 };
+  let pass1Model = 'cached';
+
+  // ── PASS 1: Feedback ──────────────────────────────────────────
+  if (!cachedFeedback) {
+    send({ type: 'progress', stage: 'generating-feedback', message: 'Pass 1/2 — generating Phase 1-3 feedback...' });
+    const feedbackPrompt = userPrompt.replace('[OUTPUT_INSTRUCTIONS_HERE]',
+      `Return ONLY valid JSON with a single key "feedback". The feedback contains the full Phase 1-3 review per the FEEDBACK section template, INCLUDING the citation verification table verbatim and ${modeNum === 2 ? 'the compact bullet-list Mode 2 revisions per the app skill' : 'the Mode 1 review notes'}. Do NOT include "draft" or "meta" keys — those come from a separate call.`);
+    let pass1;
+    try {
+      pass1 = await callSnipeAI({ system: skillPrompt, user: feedbackPrompt, maxTokens: 8000, timeoutMs: 200000 });
+    } catch(e) {
+      clearInterval(heartbeat);
+      send({ type: 'error', error: 'Pass 1 (feedback) failed: ' + e.message });
+      return res.end();
+    }
+    const parsedFb = parseAIJsonResponse(pass1.text, ['feedback']);
+    feedbackText = parsedFb.data?.feedback || '';
+    pass1Tokens = { input: pass1.inputTokens || 0, output: pass1.outputTokens || 0 };
+    pass1Model = pass1.model;
+    if (parsedFb.error || !feedbackText) {
+      clearInterval(heartbeat);
+      console.error('Pass 1 parse failed:', parsedFb.error);
+      send({ type: 'error', error: 'Pass 1 produced no usable feedback: ' + (parsedFb.error || 'empty response') });
+      return res.end();
+    }
+    // Save feedback immediately — this is the cache for retry
+    if (itemId) {
+      try {
+        const existing = await db.getContentItem(itemId);
+        if (existing) {
+          await db.updateContentItem(itemId, {
+            snipeType: 'revamp',
+            snipe: { ...(existing.snipe || {}), brief: feedbackText, mode: modeNum, articleType, competitor }
+          });
+        }
+      } catch(e) { console.error('Pass 1 save failed:', e.message); }
+    }
+    send({ type: 'progress', stage: 'feedback-saved', message: 'Feedback saved. Pass 2/2 — generating polished draft + meta...' });
+  } else {
+    send({ type: 'progress', stage: 'generating-draft', message: 'Pass 2/2 — generating polished draft + meta from cached feedback...' });
+  }
+
+  // ── PASS 2: Draft + Meta ──────────────────────────────────────
+  const draftPrompt = userPrompt.replace('[OUTPUT_INSTRUCTIONS_HERE]',
+    `Return ONLY valid JSON with keys "draft" and "meta".
+
+- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake the revisions inline)'} per your system prompt's mandatory checks. NO "Original:" / "Revised:" / "Reason:" annotations — those are in the separate feedback. Ready for CMS.
+- **meta**: meta description (≤160 chars, CTR-optimised) + internal links used + external citations used + any Unverified sources dropped.
+
+**The feedback below was already generated (reference it when applying revisions to the draft):**
+
+${feedbackText.slice(0, 8000)}`);
+
+  let pass2;
   try {
-    // Single AI call now that the app skill (revamp-skill-ir-app.md)
-    // uses a compact Mode 2 feedback format. Total output ≈ 10k tokens
-    // (compact feedback ~2k + polished draft ~7k + meta ~1k) fits well
-    // under 220s on Sonnet 4.5.
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 260000 });
+    pass2 = await callSnipeAI({ system: skillPrompt, user: draftPrompt, maxTokens: 12000, timeoutMs: 280000 });
   } catch(e) {
     clearInterval(heartbeat);
-    send({ type: 'error', error: 'AI call failed: ' + e.message });
+    send({ type: 'error', error: 'Pass 2 (draft) failed: ' + e.message + '. Feedback is saved — retry to continue from cached feedback.' });
     return res.end();
   } finally {
     clearInterval(heartbeat);
   }
 
-  const parsedRevamp = parseAIJsonResponse(aiResult.text, ['feedback', 'draft', 'meta']);
-  let result = parsedRevamp.data || { feedback: '', draft: '', meta: '' };
-  if (parsedRevamp.error) {
-    console.error('Revamp JSON parse failed:', parsedRevamp.error);
-    console.error('First 400 chars:', aiResult.text.slice(0, 400));
-    console.error('Last 200 chars:', aiResult.text.slice(-200));
-    result.feedback = `⚠ AI response could not be parsed as JSON.\n\n**Error:** ${parsedRevamp.error}\n\n**Raw response (first 2000 chars):**\n\n${aiResult.text.slice(0, 2000)}`;
+  const parsedDr = parseAIJsonResponse(pass2.text, ['draft', 'meta']);
+  let result = {
+    feedback: feedbackText,
+    draft:    parsedDr.data?.draft || '',
+    meta:     parsedDr.data?.meta  || ''
+  };
+  if (parsedDr.error) {
+    console.error('Pass 2 parse failed:', parsedDr.error);
+    if (!result.draft) result.draft = `⚠ Draft response could not be parsed.\n\n**Error:** ${parsedDr.error}\n\n**Raw (first 2000 chars):**\n\n${pass2.text.slice(0, 2000)}`;
   }
+
+  // Token totals across both passes
+  const aiResult = {
+    model: pass2.model,
+    inputTokens:  pass1Tokens.input  + (pass2.inputTokens  || 0),
+    outputTokens: pass1Tokens.output + (pass2.outputTokens || 0)
+  };
 
   // ── Post-generation link audit ────────────────────────────────
   // Extract every Markdown link in the produced draft and validate them.
@@ -3002,11 +3073,7 @@ ${externalCandidatesBlock}
 
 ## Required Output
 
-Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
-
-- **feedback**: full Phase 1-3 review per the FEEDBACK section template. Include the citation verification table. For Mode 2, use the compact bullet list format the app skill defines (NOT verbatim Original/Revised quotations).
-- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake all revisions inline)'}. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
-- **meta**: meta description (≤160 chars) + internal links used + external citations used + dropped sources.
+[OUTPUT_INSTRUCTIONS_HERE]
 
 CRITICAL:
 1. Drop any source whose status isn't \`live\` in the verification table.
@@ -3014,26 +3081,109 @@ CRITICAL:
 3. ${brand.name} listed first in any comparison table with "Revenue Operations Studio" label.
 4. No em-dashes / hedging / no-fly vocabulary / G2 links / ™ symbols.`;
 
+  // ── 2-pass sequential generation with mid-flow caching ────────
+  // Pass 1: generate feedback, save to row immediately.
+  // Pass 2: generate draft+meta using the feedback as context, save.
+  // If Pass 2 fails, Pass 1's output is already in the row — a retry
+  // can skip Pass 1 entirely (cache hit) and only re-run Pass 2.
+  //
+  // Cache check: if newItemId already has a brief field with real
+  // content, skip Pass 1.
+  let cachedFeedback = '';
+  if (newItemId) {
+    try {
+      const existing = await db.getContentItem(newItemId);
+      if (existing?.snipe?.brief && existing.snipe.brief.length > 200 && !existing.snipe?.draft) {
+        cachedFeedback = existing.snipe.brief;
+        send({ type: 'progress', stage: 'cache-hit', message: 'Using cached feedback from previous attempt — skipping straight to draft generation...' });
+      }
+    } catch(e) { /* fresh row, no cache */ }
+  }
+
   const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
-  let aiResult;
+  let feedbackText = cachedFeedback;
+  let pass1Tokens = { input: 0, output: 0 };
+  let pass1Model = 'cached';
+
+  // ── PASS 1: Feedback ──────────────────────────────────────────
+  if (!cachedFeedback) {
+    send({ type: 'progress', stage: 'generating-feedback', message: 'Pass 1/2 — generating Phase 1-3 feedback...' });
+    const feedbackPrompt = userPrompt.replace('[OUTPUT_INSTRUCTIONS_HERE]',
+      `Return ONLY valid JSON with a single key "feedback". The feedback contains the full Phase 1-3 review per the FEEDBACK section template, INCLUDING the citation verification table rendered verbatim and ${modeNum === 2 ? 'the compact bullet-list Mode 2 revisions per the app skill' : 'the Mode 1 review notes'}. Do NOT include "draft" or "meta" keys — those come from a separate call.`);
+    let pass1;
+    try {
+      pass1 = await callSnipeAI({ system: skillPrompt, user: feedbackPrompt, maxTokens: 8000, timeoutMs: 200000 });
+    } catch(e) {
+      clearInterval(heartbeat);
+      send({ type: 'error', error: 'Pass 1 (feedback) failed: ' + e.message });
+      return res.end();
+    }
+    const parsedFb = parseAIJsonResponse(pass1.text, ['feedback']);
+    feedbackText = parsedFb.data?.feedback || '';
+    pass1Tokens = { input: pass1.inputTokens || 0, output: pass1.outputTokens || 0 };
+    pass1Model = pass1.model;
+    if (parsedFb.error || !feedbackText) {
+      clearInterval(heartbeat);
+      console.error('Pass 1 parse failed:', parsedFb.error);
+      send({ type: 'error', error: 'Pass 1 produced no usable feedback: ' + (parsedFb.error || 'empty response') });
+      return res.end();
+    }
+    // Save feedback to row immediately — this is the cache for retry
+    if (newItemId) {
+      try {
+        const existing = await db.getContentItem(newItemId);
+        if (existing) {
+          await db.updateContentItem(newItemId, {
+            snipeType: 'revamp',
+            snipe: { ...(existing.snipe || {}), brief: feedbackText, parentSnipeId: snipeItemId, mode: modeNum, articleType, competitor }
+          });
+        }
+      } catch(e) { console.error('Pass 1 save failed:', e.message); }
+    }
+    send({ type: 'progress', stage: 'feedback-saved', message: 'Feedback saved. Pass 2/2 — generating polished draft + meta...' });
+  } else {
+    send({ type: 'progress', stage: 'generating-draft', message: 'Pass 2/2 — generating polished draft + meta from cached feedback...' });
+  }
+
+  // ── PASS 2: Draft + Meta ──────────────────────────────────────
+  const draftPrompt = userPrompt.replace('[OUTPUT_INSTRUCTIONS_HERE]',
+    `Return ONLY valid JSON with keys "draft" and "meta".
+
+- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake the revisions inline)'} per your system prompt. NO "Original:" / "Revised:" / "Reason:" annotations. Ready for CMS.
+- **meta**: meta description (≤160 chars) + internal links used + external citations used + dropped sources.
+
+**The feedback below was already generated (reference it when applying revisions to the draft):**
+
+${feedbackText.slice(0, 8000)}`);
+
+  let pass2;
   try {
-    // Single AI call — the app skill (revamp-skill-ir-app.md) uses a
-    // compact Mode 2 feedback format so combined output fits 220s.
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 260000 });
+    pass2 = await callSnipeAI({ system: skillPrompt, user: draftPrompt, maxTokens: 12000, timeoutMs: 280000 });
   } catch(e) {
     clearInterval(heartbeat);
-    send({ type: 'error', error: 'AI call failed: ' + e.message });
+    send({ type: 'error', error: 'Pass 2 (draft) failed: ' + e.message + '. Feedback is saved — retry to continue from cached feedback.' });
     return res.end();
   } finally {
     clearInterval(heartbeat);
   }
 
-  const parsed = parseAIJsonResponse(aiResult.text, ['feedback', 'draft', 'meta']);
-  let result = parsed.data || { feedback: '', draft: '', meta: '' };
-  if (parsed.error) {
-    console.error('Snipe-Revamp JSON parse failed:', parsed.error);
-    result.feedback = `⚠ AI response could not be parsed as JSON.\n\n**Error:** ${parsed.error}\n\n**Raw response (first 2000 chars):**\n\n${aiResult.text.slice(0, 2000)}`;
+  const parsedDr = parseAIJsonResponse(pass2.text, ['draft', 'meta']);
+  let result = {
+    feedback: feedbackText,
+    draft:    parsedDr.data?.draft || '',
+    meta:     parsedDr.data?.meta  || ''
+  };
+  if (parsedDr.error) {
+    console.error('Pass 2 parse failed:', parsedDr.error);
+    if (!result.draft) result.draft = `⚠ Draft response could not be parsed.\n\n**Error:** ${parsedDr.error}\n\n**Raw (first 2000 chars):**\n\n${pass2.text.slice(0, 2000)}`;
   }
+
+  // Token totals across both passes for accurate cost
+  const aiResult = {
+    model: pass2.model,
+    inputTokens:  pass1Tokens.input  + (pass2.inputTokens  || 0),
+    outputTokens: pass1Tokens.output + (pass2.outputTokens || 0)
+  };
 
   // Post-generation link audit (same as /api/revamp/generate)
   const sitemapSet = new Set(allInternalUrls.map(normaliseForSitemap));
