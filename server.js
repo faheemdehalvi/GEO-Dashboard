@@ -2930,7 +2930,11 @@ app.post('/api/snipe/revamp', async (req, res) => {
     const status = v.verification?.status || 'unknown';
     const httpCode = v.verification?.httpStatus ? ` (HTTP ${v.verification.httpStatus})` : '';
     const sourceTitle = v.verification?.title || '';
-    return `| ${v.anchor} | ${v.url} | ${sourceTitle} | ${status}${httpCode} | ${v.context.slice(0, 200)} |`;
+    // v.context is only populated when the link came from scrapePageWithLinks
+    // (the URL-based revamp path). The snipe-revamp path uses
+    // extractMarkdownLinks which has no context — default to empty.
+    const ctx = (v.context || '').slice(0, 200);
+    return `| ${v.anchor} | ${v.url} | ${sourceTitle} | ${status}${httpCode} | ${ctx} |`;
   }).join('\n');
   const liveLinks = verifiedLinks.filter(v => v.verification?.status === 'live').length;
   const deadLinks = verifiedLinks.length - liveLinks;
