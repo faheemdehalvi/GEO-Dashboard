@@ -2130,32 +2130,69 @@ function calcCostAUD(model, inputTokens, outputTokens) {
 // Handles common failure modes:
 //   1. AI wraps the JSON in ```json ... ``` markdown code fence
 //   2. AI prepends/appends explanatory prose around the JSON
-//   3. Response is truncated (max_tokens hit) — best-effort recovery
-// Returns { data, error }. On success: data is the parsed object, error is null.
-// On failure: data is null and error is a human-readable message.
-function parseAIJsonResponse(rawText) {
+//   3. AI emits unescaped " inside string values (invalid JSON) — falls
+//      back to per-field manual extraction by key markers
+// Returns { data, error }. On success: data is the parsed object.
+function parseAIJsonResponse(rawText, expectedKeys = ['brief', 'draft', 'meta']) {
   if (!rawText || typeof rawText !== 'string') {
     return { data: null, error: 'empty response from AI' };
   }
   let text = rawText.trim();
+  // Strip ```json / ``` / `` wrapper at start + end
+  text = text.replace(/^`{1,3}(?:json|JSON)?\s*\n?/, '').replace(/\n?`{1,3}\s*$/, '');
 
-  // Strip markdown code fence wrapper: ```json ... ``` or ``` ... ```
-  // The fence may appear at start, end, or both.
-  text = text.replace(/^```(?:json|JSON)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-
-  // Strategy 1: try to parse the cleaned text directly.
+  // Strategy 1: parse cleaned text directly
   try { return { data: JSON.parse(text), error: null }; }
   catch (e1) {
-    // Strategy 2: greedy regex — first { to last }
+    // Strategy 2: greedy {...} regex
     const m = text.match(/\{[\s\S]*\}/);
     if (m) {
       try { return { data: JSON.parse(m[0]), error: null }; }
       catch (e2) {
-        return { data: null, error: 'JSON.parse failed after stripping fences and extracting braces: ' + e2.message };
+        // Strategy 3: manual extraction by key markers. Tolerates
+        // unescaped " inside string values — slices each value between
+        // `"key": "` markers and unescapes JSON escapes manually.
+        const manual = _manualExtractAIFields(text, expectedKeys);
+        if (manual) return { data: manual, error: null, manual: true };
+        return { data: null, error: 'JSON.parse + manual extraction both failed: ' + e2.message };
       }
     }
     return { data: null, error: 'no JSON object found in response: ' + e1.message };
   }
+}
+
+function _manualExtractAIFields(text, keys) {
+  const out = {};
+  const markers = keys.map(k => {
+    const re = new RegExp(`"${k}"\\s*:\\s*"`);
+    const match = re.exec(text);
+    return match ? { key: k, valueStart: match.index + match[0].length } : null;
+  });
+  if (markers.some(m => !m)) return null;
+
+  for (let i = 0; i < markers.length; i++) {
+    const start = markers[i].valueStart;
+    let end;
+    if (i < markers.length - 1) {
+      const nextKey = markers[i + 1].key;
+      const closeRe = new RegExp(`"\\s*,\\s*"${nextKey}"\\s*:`);
+      const closeMatch = closeRe.exec(text.slice(start));
+      if (!closeMatch) return null;
+      end = start + closeMatch.index;
+    } else {
+      const closeMatch = /"\s*\}\s*$/.exec(text);
+      if (!closeMatch) return null;
+      end = closeMatch.index;
+    }
+    out[markers[i].key] = _unescapeJSONString(text.slice(start, end));
+  }
+  return out;
+}
+
+function _unescapeJSONString(s) {
+  return s
+    .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/\\\\/g, '\\');
 }
 
 // ── Snipe AI helper — Claude if key set, else OpenAI, with timeout ─
@@ -2718,7 +2755,7 @@ CRITICAL:
     clearInterval(heartbeat);
   }
 
-  const parsedRevamp = parseAIJsonResponse(aiResult.text);
+  const parsedRevamp = parseAIJsonResponse(aiResult.text, ['feedback', 'draft', 'meta']);
   let result = parsedRevamp.data || { feedback: '', draft: '', meta: '' };
   if (parsedRevamp.error) {
     console.error('Revamp JSON parse failed:', parsedRevamp.error);
