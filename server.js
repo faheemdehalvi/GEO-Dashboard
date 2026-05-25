@@ -3013,10 +3013,11 @@ CRITICAL:
   const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
   let aiResult;
   try {
-    // Tighter budget than /api/revamp/generate: snipe-revamp has a much
-    // larger prompt body (the 25k-char draft) so AI generation runs
-    // longer. 180s cap + 12k output keeps total under Vercel's 300s.
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 180000 });
+    // 180s wasn't enough — Mode 2 now produces TWO outputs in the
+    // feedback+draft fields (analysis + polished article), so generation
+    // runs longer. Bumping back to 230s. Other steps eat ~45s so total
+    // ≈ 275s, still under Vercel's 300s cap.
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 14000, timeoutMs: 230000 });
   } catch(e) {
     clearInterval(heartbeat);
     send({ type: 'error', error: 'AI call failed: ' + e.message });
