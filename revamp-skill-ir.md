@@ -274,25 +274,35 @@ If the original article had an H1, an intro, 5 H2 sections, and an FAQ, the Mode
 
 ### Mode 2 output format — feedback field
 
-In the **`feedback`** field, render section-by-section revisions. For every section that needs a change:
+In the **`feedback`** field, render a **compact bullet list** of changes — NOT full Original/Revised quotations. Output budget for the entire feedback section is ~1500 words; save the rest of your generation budget for the polished draft.
+
+Group by category:
 
 ```
-### [Original H2 / H3 heading]
+## Mode 2 Revision Summary
 
-**Original:**
-> [Quote the original sentence or section being changed]
+### Critical Errors fixed
+- [Section name]: [one-sentence description of the change] — [why]
+- [Section name]: [change] — [why]
 
-**Revised:**
-[The revised version]
+### Bridge & Pivot Language
+- [Section name]: [what was added/fixed]
+- ...
 
-**Reason:** [One-line reason — Critical Error / Bridge & Pivot / Structural / AI Citation Principles]
+### Structural Requirements
+- [Section name]: [what changed]
+- ...
+
+### AI Citation Principles applied
+- [Section name]: [what changed]
+- ...
+
+### Sources dropped
+- [Source URL/name]: [reason]
+- ...
 ```
 
-Group changes by:
-1. **Critical Errors** (company name, em-dashes, American English, grammar, ™ symbol, G2 hyperlinks)
-2. **Bridge & Pivot Language** (BOF / MOF pivot terms named, Bridge narrative present)
-3. **Structural Requirements** (BOF: IR first, RevOps Studio label, honest IR limitation, MOF cross-link / MOF: "Where IR may fall short" section, signal mechanism HOW, IR services link)
-4. **AI Citation Principles** (hedging → definitive + evidence, no-fly → measurable, Logic Bridge added to benefit claims, entity density raised, temporal qualifiers added, external citations strengthened, Experience Signal added if absent)
+Each bullet is one line, max ~25 words. Do NOT quote the original verbatim. Do NOT show the revised text — it's in the `draft` field already.
 
 ### Mode 2 output format — draft field
 
