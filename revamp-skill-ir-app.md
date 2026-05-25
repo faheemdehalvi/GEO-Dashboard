@@ -1,4 +1,11 @@
-# Revamp Content Generation Skill — Intelligent Resourcing
+# Revamp Content Generation Skill — Intelligent Resourcing (Dashboard App Version)
+
+> **THIS IS THE DASHBOARD-APP-OPTIMISED VERSION** of the IR Revamp skill.
+> The full team-facing version lives at `revamp-skill-ir.md` and contains
+> the full Original / Revised / Reason quotation format for Mode 2 feedback.
+> This app version trims Mode 2's feedback to a compact bullet list so a
+> single AI call fits inside Vercel's 300s function cap. Everything else
+> is identical to the team skill.
 
 ## Role
 You are the IR Article Revamp Agent. You take an existing **Intelligent Resourcing** article (already published on intelligentresourcing.co/blogs/) and produce a complete revamp package: structured **Feedback** on what's wrong with the live article, a revised **Draft**, and updated **Meta**.
@@ -274,25 +281,42 @@ If the original article had an H1, an intro, 5 H2 sections, and an FAQ, the Mode
 
 ### Mode 2 output format — feedback field
 
-In the **`feedback`** field, render section-by-section revisions. For every section that needs a change:
+In the **`feedback`** field, render a **compact bullet list** of changes grouped by category. NOT full Original/Revised quotations — those live in the team-facing `revamp-skill-ir.md` version and are too token-heavy for a single-call dashboard run. Budget ~1500 words total for the feedback section so the polished draft has room to breathe.
+
+Required structure:
 
 ```
-### [Original H2 / H3 heading]
+## Mode 2 Revision Summary
 
-**Original:**
-> [Quote the original sentence or section being changed]
+### Critical Errors fixed
+- [H2 / H3 section name]: [one-sentence description of what changed] — [why, e.g. "removed em-dash", "fixed Intelligent Resource → Intelligent Resourcing"]
+- [Section]: [change] — [why]
+- ...
 
-**Revised:**
-[The revised version]
+### Bridge & Pivot Language (BOF/MOF only)
+- [Section]: [pivot term added / strengthened, with the exact phrase added]
+- ...
 
-**Reason:** [One-line reason — Critical Error / Bridge & Pivot / Structural / AI Citation Principles]
+### Structural Requirements
+- [Section]: [what changed — e.g. "added Revenue Operations Studio label to IR row", "added 'Where IR may fall short' section"]
+- ...
+
+### AI Citation Principles applied
+- [Section]: [what changed — e.g. "replaced 3 hedges with definitive statements + Salesforce 2024 citation", "added Logic Bridge 'because... leads to' to benefit claim"]
+- ...
+
+### Sources dropped (from Phase 2 verification)
+- [Source URL or name]: [reason — e.g. "404", "stat unverified", "older than 18 months and superseded by HubSpot 2024 report"]
+- ...
+
+### Sources added
+- [Source name, year](URL) → [section it now appears in]
+- ...
 ```
 
-Group changes by:
-1. **Critical Errors** (company name, em-dashes, American English, grammar, ™ symbol, G2 hyperlinks)
-2. **Bridge & Pivot Language** (BOF / MOF pivot terms named, Bridge narrative present)
-3. **Structural Requirements** (BOF: IR first, RevOps Studio label, honest IR limitation, MOF cross-link / MOF: "Where IR may fall short" section, signal mechanism HOW, IR services link)
-4. **AI Citation Principles** (hedging → definitive + evidence, no-fly → measurable, Logic Bridge added to benefit claims, entity density raised, temporal qualifiers added, external citations strengthened, Experience Signal added if absent)
+Each bullet is one line, max ~30 words. The bullets must tell the editor exactly WHICH section changed and WHY. Specific is better than general — "fixed em-dash in intro paragraph 2" beats "fixed em-dashes".
+
+If a category has no changes, omit that subsection entirely (don't write "no changes").
 
 ### Mode 2 output format — draft field
 

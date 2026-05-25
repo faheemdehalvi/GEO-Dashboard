@@ -47,7 +47,11 @@ const TENANT_DEFAULTS = {
     SEMRUSH_DOMAIN: 'intelligentresourcing.co',
     SITEMAP_URLS: 'https://intelligentresourcing.co/sitemap.xml',
     SNIPE_SKILL_FILE: 'snipe-skill-ir.md',
-    REVAMP_SKILL_FILE: 'revamp-skill-ir.md',
+    // Dashboard app uses the -app variant which has a compact Mode 2
+    // feedback format (single AI call fits Vercel's 300s cap). The
+    // full team-facing skill at revamp-skill-ir.md stays untouched
+    // for organic Claude use.
+    REVAMP_SKILL_FILE: 'revamp-skill-ir-app.md',
     // IR omits semrush + mqls + deals + youtube (the IR YouTube brand
     // account isn't properly attached to anthony@intelligentresourcing.co
     // at the Google level — only at YouTube Studio Manager level — so

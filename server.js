@@ -2732,8 +2732,8 @@ ${externalCandidatesBlock}
 
 Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
 
-- **feedback**: full Phase 1-3 review following the FEEDBACK section template in your system prompt. Include the citation verification table verbatim.
-- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, but bake all revisions inline)'} per your system prompt's mandatory checks. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
+- **feedback**: full Phase 1-3 review following the FEEDBACK section template in your system prompt. Include the citation verification table verbatim. For Mode 2, use the compact bullet list format the app skill defines (NOT verbatim Original/Revised quotations).
+- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake all revisions inline)'} per your system prompt's mandatory checks. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
 - **meta**: meta description (≤160 chars, CTR-optimised) + internal links used + external citations used + any Unverified sources dropped.
 
 CRITICAL:
@@ -2746,7 +2746,11 @@ CRITICAL:
   const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
   let aiResult;
   try {
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 16000, timeoutMs: 220000 });
+    // Single AI call now that the app skill (revamp-skill-ir-app.md)
+    // uses a compact Mode 2 feedback format. Total output ≈ 10k tokens
+    // (compact feedback ~2k + polished draft ~7k + meta ~1k) fits well
+    // under 220s on Sonnet 4.5.
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 220000 });
   } catch(e) {
     clearInterval(heartbeat);
     send({ type: 'error', error: 'AI call failed: ' + e.message });
@@ -3000,7 +3004,7 @@ ${externalCandidatesBlock}
 
 Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
 
-- **feedback**: full Phase 1-3 review per the FEEDBACK section template. Include the citation verification table.
+- **feedback**: full Phase 1-3 review per the FEEDBACK section template. Include the citation verification table. For Mode 2, use the compact bullet list format the app skill defines (NOT verbatim Original/Revised quotations).
 - **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake all revisions inline)'}. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
 - **meta**: meta description (≤160 chars) + internal links used + external citations used + dropped sources.
 
@@ -3013,11 +3017,9 @@ CRITICAL:
   const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
   let aiResult;
   try {
-    // 180s wasn't enough — Mode 2 now produces TWO outputs in the
-    // feedback+draft fields (analysis + polished article), so generation
-    // runs longer. Bumping back to 230s. Other steps eat ~45s so total
-    // ≈ 275s, still under Vercel's 300s cap.
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 14000, timeoutMs: 230000 });
+    // Single AI call — the app skill (revamp-skill-ir-app.md) uses a
+    // compact Mode 2 feedback format so combined output fits 220s.
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 220000 });
   } catch(e) {
     clearInterval(heartbeat);
     send({ type: 'error', error: 'AI call failed: ' + e.message });
