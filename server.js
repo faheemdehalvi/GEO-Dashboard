@@ -2868,6 +2868,239 @@ CRITICAL:
   res.end();
 });
 
+// ============================================================
+// Revamp from an existing Snipe — same skill process as /api/revamp/generate
+// but takes the snipe's draft text as input instead of scraping a URL.
+// Body: { snipeItemId, articleType, competitor, mode, newItemId }
+// Creates a NEW content_item (linked to the parent via snipe.parentSnipeId)
+// so the original snipe stays intact and the user sees both rows.
+// ============================================================
+app.post('/api/snipe/revamp', async (req, res) => {
+  const { snipeItemId, articleType = 'general', competitor = '', mode = 1, newItemId } = req.body || {};
+  if (!snipeItemId) return res.status(400).json({ error: 'snipeItemId required' });
+  if (!req.config.revampSkillFile) return res.status(400).json({ error: 'Revamp is not enabled for this tenant' });
+  if (!(req.config.contentFeatures || []).includes('revamp')) return res.status(400).json({ error: 'Revamp is not enabled for this tenant' });
+
+  const sourceItem = await db.getContentItem(snipeItemId);
+  if (!sourceItem) return res.status(404).json({ error: 'Source snipe not found' });
+  const sourceDraft = sourceItem.snipe?.draft;
+  const sourceBrief = sourceItem.snipe?.brief || '';
+  if (!sourceDraft || sourceDraft.length < 100) {
+    return res.status(400).json({ error: 'Source snipe has no draft content to revamp' });
+  }
+
+  const brand = req.config.brand;
+  const skillFile = path.join(__dirname, req.config.revampSkillFile);
+  const sitemapUrls = req.config.sitemap.urls;
+  const modeNum = parseInt(mode) === 2 ? 2 : 1;
+  const typeLabel = articleType === 'bof' ? 'BOF (Best alternatives to ' + (competitor || 'competitor') + ')'
+                  : articleType === 'mof' ? 'MOF (' + brand.name + ' vs ' + (competitor || 'competitor') + ')'
+                  : 'General comparison / roundup';
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  const send = (d) => { res.write(`data: ${JSON.stringify(d)}\n\n`); };
+
+  let skillPrompt = '';
+  try { skillPrompt = fs.readFileSync(skillFile, 'utf8'); }
+  catch(e) { send({ type: 'error', error: 'Could not load revamp skill file: ' + e.message }); return res.end(); }
+
+  // Source article = the snipe's draft text. No scraping needed.
+  send({ type: 'progress', stage: 'sitemap', message: 'Fetching sitemap...' });
+  const sitemapResults = await Promise.all(sitemapUrls.map(u => fetchSitemapUrls(u)));
+  const rawSitemapUrls = sitemapResults.flat();
+
+  send({ type: 'progress', stage: 'sitemap', message: `Validating ${Math.min(50, rawSitemapUrls.length)} sitemap URLs...` });
+  const allInternalUrls = await prefilterSitemap(rawSitemapUrls, { cap: 50, concurrency: 15, timeoutMs: 3500 });
+
+  // Phase 2: verify external links INSIDE the snipe's draft. The snipe
+  // generator emits Markdown links; we audit them the same way as the
+  // URL-based revamp does for the article body.
+  const internalDomain = brand.domain.replace(/^www\./,'').toLowerCase();
+  const allLinks = extractMarkdownLinks(sourceDraft, internalDomain);
+  const externalLinksInDraft = allLinks.filter(l => !l.internal).slice(0, 10);
+  send({ type: 'progress', stage: 'verifying', message: `Verifying ${externalLinksInDraft.length} external citations from the snipe draft...` });
+  const verifiedLinks = await verifyAllLinks(externalLinksInDraft, 5);
+
+  const verificationRows = verifiedLinks.map(v => {
+    const status = v.verification?.status || 'unknown';
+    const httpCode = v.verification?.httpStatus ? ` (HTTP ${v.verification.httpStatus})` : '';
+    const sourceTitle = v.verification?.title || '';
+    return `| ${v.anchor} | ${v.url} | ${sourceTitle} | ${status}${httpCode} | ${v.context.slice(0, 200)} |`;
+  }).join('\n');
+  const liveLinks = verifiedLinks.filter(v => v.verification?.status === 'live').length;
+  const deadLinks = verifiedLinks.length - liveLinks;
+
+  send({ type: 'progress', stage: 'searching', message: 'Finding fresh authoritative source candidates...' });
+  // Topic for external source search = source item's title (the snipe's chosen title)
+  const topic = sourceItem.title || competitor || 'B2B revenue operations';
+  const externalCandidates = await searchExternalSourcesForSnipe(topic, brand.domain).catch(() => []);
+
+  send({ type: 'progress', stage: 'generating', message: 'Reviewing + revising the snipe draft (this can take 2-4 minutes)...' });
+
+  const internalLinksBlock = allInternalUrls.length
+    ? allInternalUrls.slice(0, 80).map(u => `- ${u}`).join('\n')
+    : `- https://${brand.domain}/`;
+
+  const externalCandidatesBlock = externalCandidates.length
+    ? externalCandidates.slice(0, 12).map(s => `- [${s.title}](${s.url}) — ${s.snippet ? s.snippet.slice(0, 150) : ''}`).join('\n')
+    : '(Use your knowledge to suggest authoritative sources: HubSpot, Salesforce, LinkedIn B2B Institute, Gong, Drift, 6sense, Salesloft, Outreach, Pipedrive, Demand Gen Report, HBR. Max 1 from McKinsey/Forrester/Gartner combined. No G2 links.)';
+
+  const userPrompt = `You are revamping an existing draft article for ${brand.name} that was generated by the Snipe process. The original draft is below — your job is to apply the Revamp skill's full Phase 1-3 review + Mode ${modeNum} treatment to it.
+
+**Source:** Snipe-generated draft (no scrape — full text below).
+**Article Type:** ${typeLabel}
+**Competitor:** ${competitor || 'N/A'}
+**Selected Mode:** ${modeNum === 1 ? 'Mode 1 — Full GEO Restructure' : 'Mode 2 — Best Practices Update (preserve existing structure)'}
+**Source Item Title:** ${sourceItem.title || '(none)'}
+
+**Original Brief (context from the snipe):**
+${sourceBrief.slice(0, 3000)}
+
+**Original Draft (the article to revamp, ${sourceDraft.length} chars):**
+${sourceDraft}
+
+---
+
+## Phase 2 — Citation Verification Table
+
+${externalLinksInDraft.length} external links found in the source draft. ${liveLinks} verified live, ${deadLinks} unverified/dead.
+
+| Anchor Text | URL | Source Page Title | Status | Context in Article |
+|---|---|---|---|---|
+${verificationRows || '| (no external links found in source draft) | | | | |'}
+
+**Action rule:** Sources with status not equal to \`live\` are UNVERIFIED and MUST be dropped from the revised draft.
+
+---
+
+## ${brand.name} Sitemap (use ONLY these URLs for internal links)
+
+${internalLinksBlock}
+
+---
+
+## Authoritative External Source Candidates
+
+${externalCandidatesBlock}
+
+---
+
+## Required Output
+
+Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
+
+- **feedback**: full Phase 1-3 review per the FEEDBACK section template. Include the citation verification table.
+- **draft**: revised article applying ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update)'}.
+- **meta**: meta description (≤160 chars) + internal links used + external citations used + dropped sources.
+
+CRITICAL:
+1. Drop any source whose status isn't \`live\` in the verification table.
+2. Internal links from the sitemap list ONLY.
+3. ${brand.name} listed first in any comparison table with "Revenue Operations Studio" label.
+4. No em-dashes / hedging / no-fly vocabulary / G2 links / ™ symbols.`;
+
+  const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
+  let aiResult;
+  try {
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 16000, timeoutMs: 220000 });
+  } catch(e) {
+    clearInterval(heartbeat);
+    send({ type: 'error', error: 'AI call failed: ' + e.message });
+    return res.end();
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  const parsed = parseAIJsonResponse(aiResult.text, ['feedback', 'draft', 'meta']);
+  let result = parsed.data || { feedback: '', draft: '', meta: '' };
+  if (parsed.error) {
+    console.error('Snipe-Revamp JSON parse failed:', parsed.error);
+    result.feedback = `⚠ AI response could not be parsed as JSON.\n\n**Error:** ${parsed.error}\n\n**Raw response (first 2000 chars):**\n\n${aiResult.text.slice(0, 2000)}`;
+  }
+
+  // Post-generation link audit (same as /api/revamp/generate)
+  const sitemapSet = new Set(allInternalUrls.map(normaliseForSitemap));
+  const draftLinks = extractMarkdownLinks(result.draft || '', internalDomain);
+  const internalLinks = draftLinks.filter(l => l.internal);
+  const externalLinks = draftLinks.filter(l => !l.internal);
+  const internalAudit = internalLinks.map(l => ({ ...l, ok: sitemapSet.has(normaliseForSitemap(l.url)), note: sitemapSet.has(normaliseForSitemap(l.url)) ? 'in sitemap' : 'NOT in verified sitemap' }));
+  send({ type: 'progress', stage: 'auditing', message: `Auditing ${internalLinks.length} internal + ${externalLinks.length} external links in the revamped draft...` });
+  const extToCheck = externalLinks.slice(0, 8);
+  const extResults = await Promise.all(extToCheck.map(async (l) => {
+    const ok = await quickHeadCheck(l.url, 3500);
+    return { ...l, ok, note: ok ? 'live' : 'DEAD / blocked' };
+  }));
+  const externalAudit = [...extResults, ...externalLinks.slice(8).map(l => ({ ...l, ok: null, note: 'not audited (over cap)' }))];
+
+  const minInternal = 3, minExternal = 5;
+  const internalLiveCount = internalAudit.filter(l => l.ok).length;
+  const externalLiveCount = externalAudit.filter(l => l.ok).length;
+  const internalDeadCount = internalAudit.length - internalLiveCount;
+  const externalDeadCount = externalAudit.filter(l => l.ok === false).length;
+
+  const auditLines = ['', '---', '', '## Link Audit (auto-generated, post-AI)', ''];
+  auditLines.push(`**Internal:** ${internalLiveCount} verified / ${internalAudit.length} total (minimum ${minInternal}). ${internalDeadCount ? `**${internalDeadCount} not in sitemap — replace these.**` : '✓'}`);
+  auditLines.push(`**External:** ${externalLiveCount} verified live / ${externalAudit.length} total (minimum ${minExternal}). ${externalDeadCount ? `**${externalDeadCount} dead — replace these.**` : '✓'}`);
+  if (internalLiveCount < minInternal) auditLines.push(`> **Below internal-link minimum (${minInternal}).** Add ${minInternal - internalLiveCount} more from the sitemap.`);
+  if (externalLiveCount < minExternal) auditLines.push(`> **Below external-citation minimum (${minExternal}).** Add ${minExternal - externalLiveCount} more authoritative sources.`);
+  auditLines.push('');
+  if (internalAudit.length) {
+    auditLines.push('### Internal Links in Revamped Draft', '| Anchor | URL | Status |', '|---|---|---|');
+    internalAudit.forEach(l => auditLines.push(`| ${l.anchor.slice(0,60)} | ${l.url} | ${l.ok ? '✅ ' + l.note : '❌ ' + l.note} |`));
+    auditLines.push('');
+  }
+  if (externalAudit.length) {
+    auditLines.push('### External Links in Revamped Draft', '| Anchor | URL | Status |', '|---|---|---|');
+    externalAudit.forEach(l => auditLines.push(`| ${l.anchor.slice(0,60)} | ${l.url} | ${l.ok === true ? '✅ ' + l.note : l.ok === false ? '❌ ' + l.note : '⚠ ' + l.note} |`));
+    auditLines.push('');
+  }
+  result.feedback = (result.feedback || '') + auditLines.join('\n');
+
+  const costAUD = calcCostAUD(aiResult.model, aiResult.inputTokens, aiResult.outputTokens);
+  const costStr = `$${costAUD.toFixed(4)} AUD`;
+  const costMeta = { model: aiResult.model, inputTokens: aiResult.inputTokens, outputTokens: aiResult.outputTokens, costAUD: parseFloat(costAUD.toFixed(4)) };
+
+  // Save to the NEW content_item the frontend created up-front. Stamps the
+  // link back to the parent snipe so the UI can show "Revamp of [Title]"
+  // and the two rows stay clearly related.
+  if (newItemId) {
+    try {
+      const existing = await db.getContentItem(newItemId);
+      if (existing) {
+        await db.updateContentItem(newItemId, {
+          snipeType: 'revamp',
+          snipe: {
+            brief: result.feedback,
+            draft: result.draft,
+            meta: result.meta,
+            generatedAt: new Date().toISOString(),
+            parentSnipeId: snipeItemId,
+            sourceMode: 'snipe-draft',
+            mode: modeNum,
+            articleType,
+            competitor
+          },
+          title: existing.title || ('Revamp: ' + (sourceItem.title || 'Untitled')),
+          cost: costMeta
+        });
+      }
+    } catch(e) { console.error('snipe-revamp save:', e.message); }
+  }
+
+  send({ type: 'stage', stage: 'feedback' });
+  await new Promise(r => setTimeout(r, 300));
+  send({ type: 'stage', stage: 'draft' });
+  await new Promise(r => setTimeout(r, 300));
+  send({ type: 'stage', stage: 'meta' });
+  await new Promise(r => setTimeout(r, 200));
+  send({ type: 'complete', feedback: result.feedback, draft: result.draft, meta: result.meta, costAUD: parseFloat(costAUD.toFixed(4)), costStr, model: aiResult.model, parentSnipeId: snipeItemId, newItemId });
+  res.end();
+});
+
 // PATCH /api/content-items/:id — update a content item
 app.patch('/api/content-items/:id', async (req, res) => {
   try {
