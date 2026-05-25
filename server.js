@@ -2126,6 +2126,38 @@ function calcCostAUD(model, inputTokens, outputTokens) {
   return usd * AUD_RATE;
 }
 
+// Robustly extract a JSON object from an LLM response.
+// Handles common failure modes:
+//   1. AI wraps the JSON in ```json ... ``` markdown code fence
+//   2. AI prepends/appends explanatory prose around the JSON
+//   3. Response is truncated (max_tokens hit) — best-effort recovery
+// Returns { data, error }. On success: data is the parsed object, error is null.
+// On failure: data is null and error is a human-readable message.
+function parseAIJsonResponse(rawText) {
+  if (!rawText || typeof rawText !== 'string') {
+    return { data: null, error: 'empty response from AI' };
+  }
+  let text = rawText.trim();
+
+  // Strip markdown code fence wrapper: ```json ... ``` or ``` ... ```
+  // The fence may appear at start, end, or both.
+  text = text.replace(/^```(?:json|JSON)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+
+  // Strategy 1: try to parse the cleaned text directly.
+  try { return { data: JSON.parse(text), error: null }; }
+  catch (e1) {
+    // Strategy 2: greedy regex — first { to last }
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) {
+      try { return { data: JSON.parse(m[0]), error: null }; }
+      catch (e2) {
+        return { data: null, error: 'JSON.parse failed after stripping fences and extracting braces: ' + e2.message };
+      }
+    }
+    return { data: null, error: 'no JSON object found in response: ' + e1.message };
+  }
+}
+
 // ── Snipe AI helper — Claude if key set, else OpenAI, with timeout ─
 // Returns { text, model, inputTokens, outputTokens }
 async function callSnipeAI({ system, user, maxTokens = 600, fast = false, timeoutMs: timeoutOverride }) {
@@ -2290,17 +2322,20 @@ Return ONLY valid JSON with keys "brief", "draft", "meta". No text before or aft
     const heartbeat = setInterval(() => { try { res.write(': keepalive\n\n'); } catch(_) {} }, 5000);
     let aiResult;
     try {
-      aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000 });
+      aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 16000 });
     } finally {
       clearInterval(heartbeat);
     }
-    // Extract JSON from response
-    const jsonMatch = aiResult.text.match(/\{[\s\S]*\}/);
-    let result = { brief: '', draft: '', meta: '' };
-    if (jsonMatch) {
-      try { result = JSON.parse(jsonMatch[0]); } catch(e) {
-        result.brief = aiResult.text;
-      }
+    // Extract JSON from response (robust — handles code-fence wrapping)
+    const parsed = parseAIJsonResponse(aiResult.text);
+    let result = parsed.data || { brief: '', draft: '', meta: '' };
+    if (parsed.error) {
+      console.error('Snipe JSON parse failed:', parsed.error);
+      console.error('First 400 chars:', aiResult.text.slice(0, 400));
+      console.error('Last 200 chars:', aiResult.text.slice(-200));
+      // Surface a useful error in the Brief tab so the user can see what
+      // went wrong instead of a silent blank state.
+      result.brief = `⚠ AI response could not be parsed as JSON.\n\n**Error:** ${parsed.error}\n\n**Raw response (first 2000 chars):**\n\n${aiResult.text.slice(0, 2000)}`;
     }
 
     // Calculate cost
@@ -2683,11 +2718,13 @@ CRITICAL:
     clearInterval(heartbeat);
   }
 
-  const jsonMatch = aiResult.text.match(/\{[\s\S]*\}/);
-  let result = { feedback: '', draft: '', meta: '' };
-  if (jsonMatch) {
-    try { result = JSON.parse(jsonMatch[0]); }
-    catch(e) { result.feedback = aiResult.text; }
+  const parsedRevamp = parseAIJsonResponse(aiResult.text);
+  let result = parsedRevamp.data || { feedback: '', draft: '', meta: '' };
+  if (parsedRevamp.error) {
+    console.error('Revamp JSON parse failed:', parsedRevamp.error);
+    console.error('First 400 chars:', aiResult.text.slice(0, 400));
+    console.error('Last 200 chars:', aiResult.text.slice(-200));
+    result.feedback = `⚠ AI response could not be parsed as JSON.\n\n**Error:** ${parsedRevamp.error}\n\n**Raw response (first 2000 chars):**\n\n${aiResult.text.slice(0, 2000)}`;
   }
 
   // ── Post-generation link audit ────────────────────────────────
