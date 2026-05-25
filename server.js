@@ -2750,7 +2750,7 @@ CRITICAL:
     // uses a compact Mode 2 feedback format. Total output ≈ 10k tokens
     // (compact feedback ~2k + polished draft ~7k + meta ~1k) fits well
     // under 220s on Sonnet 4.5.
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 220000 });
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 260000 });
   } catch(e) {
     clearInterval(heartbeat);
     send({ type: 'error', error: 'AI call failed: ' + e.message });
@@ -3019,7 +3019,7 @@ CRITICAL:
   try {
     // Single AI call — the app skill (revamp-skill-ir-app.md) uses a
     // compact Mode 2 feedback format so combined output fits 220s.
-    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 220000 });
+    aiResult = await callSnipeAI({ system: skillPrompt, user: userPrompt, maxTokens: 12000, timeoutMs: 260000 });
   } catch(e) {
     clearInterval(heartbeat);
     send({ type: 'error', error: 'AI call failed: ' + e.message });
