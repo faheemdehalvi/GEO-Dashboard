@@ -2195,12 +2195,13 @@ function _unescapeJSONString(s) {
     .replace(/\\"/g, '"').replace(/\\\//g, '/').replace(/\\\\/g, '\\');
 }
 
-// ── Snipe AI helper — Claude if key set, else OpenAI, with timeout ─
+// ── Snipe AI helper — OpenRouter if key set, else Anthropic, else OpenAI ─
 // Returns { text, model, inputTokens, outputTokens }
 async function callSnipeAI({ system, user, maxTokens = 600, fast = false, timeoutMs: timeoutOverride }) {
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || CONFIG.anthropic?.apiKey;
-  const OPENAI_KEY    = process.env.OPENAI_API_KEY    || CONFIG.openai?.apiKey;
-  const timeoutMs     = timeoutOverride || (fast ? 20000 : 240000); // 4 min for full brief/draft/meta. Override to leave headroom under Vercel's 300s function cap when other steps (link prefilter, Phase 2 verify, post-audit) eat into the budget.
+  const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
+  const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY || CONFIG.anthropic?.apiKey;
+  const OPENAI_KEY     = process.env.OPENAI_API_KEY    || CONFIG.openai?.apiKey;
+  const timeoutMs      = timeoutOverride || (fast ? 20000 : 240000); // 4 min for full brief/draft/meta. Override to leave headroom under Vercel's 300s function cap when other steps (link prefilter, Phase 2 verify, post-audit) eat into the budget.
 
   const withTimeout = (fetchPromise) => {
     const ctrl = new AbortController();
@@ -2208,7 +2209,32 @@ async function callSnipeAI({ system, user, maxTokens = 600, fast = false, timeou
     return fetchPromise(ctrl.signal).finally(() => clearTimeout(timer));
   };
 
-  if (ANTHROPIC_KEY && !ANTHROPIC_KEY.includes('your_anthropic')) {
+  if (OPENROUTER_KEY && !OPENROUTER_KEY.includes('your_openrouter')) {
+    const model = fast
+      ? (process.env.OPENROUTER_MODEL_FAST || 'anthropic/claude-haiku-4.5')
+      : (process.env.OPENROUTER_MODEL_FULL || 'anthropic/claude-sonnet-4.5');
+    const d = await withTimeout(signal => fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST', signal,
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://geo-dashboard.local',
+        'X-Title': 'IR GEO Dashboard'
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }]
+      })
+    }).then(r => r.json()));
+    if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
+    return {
+      text: d.choices?.[0]?.message?.content || '',
+      model: `openrouter:${model}`,
+      inputTokens: d.usage?.prompt_tokens || 0,
+      outputTokens: d.usage?.completion_tokens || 0
+    };
+  } else if (ANTHROPIC_KEY && !ANTHROPIC_KEY.includes('your_anthropic')) {
     const model = fast ? 'claude-haiku-4-5' : 'claude-sonnet-4-5';
     const d = await withTimeout(signal => fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', signal,
@@ -2227,7 +2253,7 @@ async function callSnipeAI({ system, user, maxTokens = 600, fast = false, timeou
     if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
     return { text: d.choices?.[0]?.message?.content || '', model, inputTokens: d.usage?.prompt_tokens || 0, outputTokens: d.usage?.completion_tokens || 0 };
   } else {
-    throw new Error('No AI API key configured. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to .env');
+    throw new Error('No AI API key configured. Add OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to .env');
   }
 }
 
