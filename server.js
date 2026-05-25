@@ -2733,7 +2733,7 @@ ${externalCandidatesBlock}
 Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
 
 - **feedback**: full Phase 1-3 review following the FEEDBACK section template in your system prompt. Include the citation verification table verbatim.
-- **draft**: revised article. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure)'} per your system prompt's mandatory checks.
+- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, but bake all revisions inline)'} per your system prompt's mandatory checks. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
 - **meta**: meta description (≤160 chars, CTR-optimised) + internal links used + external citations used + any Unverified sources dropped.
 
 CRITICAL:
@@ -3001,7 +3001,7 @@ ${externalCandidatesBlock}
 Return ONLY valid JSON with keys "feedback", "draft", "meta". No text before or after the JSON.
 
 - **feedback**: full Phase 1-3 review per the FEEDBACK section template. Include the citation verification table.
-- **draft**: revised article applying ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update)'}.
+- **draft**: the **final polished article ready for publishing**. Single coherent piece in publish-ready prose. Apply ${modeNum === 1 ? 'Mode 1 (full GEO Restructure)' : 'Mode 2 (Best Practices Update — preserve existing structure, bake all revisions inline)'}. The draft field MUST NOT contain "Original:" / "Revised:" / "Reason:" annotations — those belong in feedback. Anyone reading this field reads a clean article ready for the CMS.
 - **meta**: meta description (≤160 chars) + internal links used + external citations used + dropped sources.
 
 CRITICAL:

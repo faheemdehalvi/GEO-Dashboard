@@ -264,9 +264,17 @@ If the original H1 promises a step-by-step guide, every action H2 must carry a "
 
 Use Mode 2 ONLY when the input specifies Mode 2. Apply fixes WITHIN the existing structure. Do NOT impose the full GEO restructure.
 
-### Mode 2 output format
+### CRITICAL — what goes in `draft` vs `feedback`
 
-Section-by-section revision. For every section that needs a change, render:
+The Section-by-Section Revision (Original / Revised / Reason annotations) is **the analysis**, not the article. It belongs in the **`feedback`** JSON field, NOT the `draft` field.
+
+The **`draft`** field MUST contain the **final polished publish-ready article** with every revision already baked in. The reader of the `draft` field should be able to copy-paste it straight to the CMS — they should NOT see "Original / Revised / Reason" annotations. The reader of the `feedback` field sees the analysis explaining what changed and why.
+
+If the original article had an H1, an intro, 5 H2 sections, and an FAQ, the Mode 2 `draft` must contain the same shape — H1, intro, 5 H2 sections, FAQ — with all the revisions applied inline. The `feedback` separately enumerates what was changed.
+
+### Mode 2 output format — feedback field
+
+In the **`feedback`** field, render section-by-section revisions. For every section that needs a change:
 
 ```
 ### [Original H2 / H3 heading]
@@ -275,7 +283,7 @@ Section-by-section revision. For every section that needs a change, render:
 > [Quote the original sentence or section being changed]
 
 **Revised:**
-[The revised version, written in publish-ready prose]
+[The revised version]
 
 **Reason:** [One-line reason — Critical Error / Bridge & Pivot / Structural / AI Citation Principles]
 ```
@@ -286,15 +294,48 @@ Group changes by:
 3. **Structural Requirements** (BOF: IR first, RevOps Studio label, honest IR limitation, MOF cross-link / MOF: "Where IR may fall short" section, signal mechanism HOW, IR services link)
 4. **AI Citation Principles** (hedging → definitive + evidence, no-fly → measurable, Logic Bridge added to benefit claims, entity density raised, temporal qualifiers added, external citations strengthened, Experience Signal added if absent)
 
+### Mode 2 output format — draft field
+
+In the **`draft`** field, output the complete final article with all the revisions from above applied inline. Structure:
+
+```
+# [H1 — same topic / angle as the original, optionally polished]
+
+[Opening intro — same shape as the original, with revisions baked in: hedging removed, no-fly vocab replaced, temporal qualifiers added, Logic Bridges inserted, at least one external citation as a Markdown hyperlink.]
+
+**Key Takeaways:** (if the original had them)
+- [Revised bullets]
+
+---
+
+## [Original H2 #1 — same heading as original, kept verbatim unless the original was vague/promotional/wrong]
+
+[Revised section content, full prose, publish-ready. Every benefit claim now carries Because/Therefore/Leads to. At least one external citation as Markdown hyperlink. Named entities + temporal qualifiers where time-sensitive.]
+
+### [Original H3 — kept]
+
+[Revised content, full prose.]
+
+[...continue for every H2/H3 the original had, in the original order, with revisions baked in...]
+
+## Frequently Asked Questions
+
+[FAQ Q&As, no links in answers — same shape as original]
+```
+
+The `draft` is a SINGLE coherent article. No "Original:" / "Revised:" / "Reason:" labels appear in it. Anyone reading the `draft` field reads an article ready for the CMS.
+
 ### Mode 2 mandatory checks
 
+- `feedback` field contains the section-by-section analysis (Original / Revised / Reason)
+- `draft` field contains the polished final article with all revisions baked in — NO annotations
 - All Critical Errors fixed
 - Every benefit claim now carries Because / Therefore / Leads to
 - Every H2 now has at least one external citation integrated inline
 - Internal links: 3–5 minimum, integrated organically into existing prose
 - At least one Experience Signal paragraph present
 - Sources marked Unverified in Phase 2 are dropped
-- Existing structure preserved — no full GEO restructure
+- Existing structure preserved — no full GEO restructure (Mode 1 territory)
 - No framework terms ("Steelman", "Trinity", etc.) in copy
 
 ### What Mode 2 does NOT do
